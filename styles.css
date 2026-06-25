@@ -1,4 +1,5 @@
-/* 星环图谱视图样式（迁移自 HTML 原型） */
+/* 星环图谱视图样式 */
+
 .star-ring-view {
   background-color: #1e1e1e;
   color: #e0e0e0;
@@ -12,16 +13,15 @@
   display: block;
   width: 100%;
   height: 100%;
-  cursor: default;          /* 默认普通光标 */
+  cursor: default;
 }
 
 .star-ring-view svg:active {
-  cursor: grabbing;         /* Ctrl+拖拽时抓手 */
+  cursor: grabbing;
 }
 
-/* 节点光标：可拖拽 */
 .star-ring-view .node {
-  cursor: grab;
+  cursor: pointer;
 }
 
 /* 命中圆：完全隐形，仅用于扩大点击区 */
@@ -31,82 +31,117 @@
   pointer-events: all;
 }
 
-.star-ring-view .node circle:not(.hit-area) {
+/* 可见节点圆 */
+.star-ring-view .node .node-circle {
   stroke: #1e1e1e;
   stroke-width: 2px;
   pointer-events: none;
-  filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.15));
   transition: all 0.2s ease;
 }
 
-/* 互动遮罩层：互动时显示，压暗整个背板 */
+/* 玻璃质感蒙版层：HTML div，覆盖 SVG 之上 */
 .star-ring-view .interact-overlay {
-  fill: rgba(0, 0, 0, 0.55);
+  position: absolute;
+  inset: 0;
   pointer-events: none;
+  background: rgba(8, 8, 12, 0.45);
+  backdrop-filter: blur(5px) saturate(0.8);
+  -webkit-backdrop-filter: blur(5px) saturate(0.8);
   opacity: 0;
-  transition: opacity 0.2s ease;
+  transition: opacity 0.6s ease-out, backdrop-filter 0.6s ease-out;
 }
+
 .star-ring-view .interacting .interact-overlay {
   opacity: 1;
 }
 
-/* 缩放级别低时隐藏节点文字 */
-.star-ring-view .hide-text .node text {
+/* 缩放分级：控制文字显示 */
+.star-ring-view .zoom-far .node-label,
+.star-ring-view .zoom-mid .node-label[data-type="Frag"],
+.star-ring-view .zoom-mid .node-label[data-type="Error"] {
   display: none;
 }
-.star-ring-view .node text {
+
+.star-ring-view .zoom-mid .node-label {
+  font-size: 9px;
+}
+
+.star-ring-view .zoom-close .node-label {
   font-size: 11px;
-  font-weight: 300;            /* 调细 */
+}
+
+/* 普通节点文字 */
+.star-ring-view .node text {
+  font-weight: 300;
   pointer-events: none;
-  transition: opacity 0.2s ease;
-  fill: #909090;
+  transition: opacity 0.2s ease, fill 0.2s ease;
+  fill: #b0b0b0;
   paint-order: stroke;
   stroke: #1e1e1e;
   stroke-width: 1.5px;
   stroke-linejoin: round;
 }
 
+.star-ring-view .node-label {
+  font-size: 11px;
+  dominant-baseline: middle;
+}
+
+/* 连线 */
 .star-ring-view .link {
+  fill: none;
   stroke: #4a4a4a;
-  stroke-opacity: 0.6;
+  stroke-opacity: 0.5;
   stroke-width: 1.2px;
   transition: all 0.2s ease;
 }
 
-/* active 节点/连线：不特殊高亮，保持原样，靠其他元素的 dimmed 衬托 */
-.star-ring-view .node-active circle {
-  stroke: #1e1e1e;
+/* active 状态 */
+.star-ring-view .node-active .node-circle {
+  stroke: #ffffff;
   stroke-width: 2px;
-  filter: none;
-}
-.star-ring-view .node-active text {
-  fill: #909090;
-  font-weight: 300;
-}
-.star-ring-view .link-active {
-  stroke: #4a4a4a;
-  stroke-opacity: 0.6;
-  stroke-width: 1.2px;
+  filter: url(#node-glow);
 }
 
-/* 暗化节点：饱和度极低 + 文字消失 */
+.star-ring-view .node-active text {
+  fill: #ffffff;
+  font-weight: 600;
+  stroke: #000000;
+  stroke-width: 1px;
+  paint-order: stroke;
+}
+
+.star-ring-view .link-active {
+  stroke: #a78bfa;
+  stroke-opacity: 1;
+  stroke-width: 2px;
+  filter: drop-shadow(0 0 3px rgba(167, 139, 250, 0.6));
+}
+
+/* 暗化状态 */
 .star-ring-view .node-dimmed {
-  opacity: 0.12;
+  opacity: 0.08;
   filter: saturate(0);
 }
+
 .star-ring-view .node-dimmed text {
   display: none;
 }
-.star-ring-view .link-dimmed { opacity: 0.03; }
 
-/* 互动时章节标签、轨道、分色背景全部暗化 */
+.star-ring-view .link-dimmed {
+  opacity: 0.02;
+}
+
+/* 互动时背景元素变暗 */
 .star-ring-view .interacting .chapter-label,
 .star-ring-view .interacting .ring-label {
   opacity: 0.2;
 }
+
 .star-ring-view .interacting .ring-circle {
   stroke-opacity: 0.2;
 }
+
 .star-ring-view .interacting .bg-region {
   opacity: 0.3;
 }
@@ -118,6 +153,7 @@
   stroke-width: 1px;
   stroke-dasharray: 3 6;
 }
+
 .star-ring-view .ring-label {
   font-size: 11px;
   fill: #888;
@@ -125,10 +161,12 @@
   font-weight: bold;
   letter-spacing: 1px;
 }
+
+/* 章节和根节点文字 */
 .star-ring-view .chapter-label {
   font-size: 13px;
   fill: #aaa;
   text-anchor: middle;
-  font-weight: 400;           /* 调细（原 bold） */
+  font-weight: 400;
   pointer-events: none;
 }

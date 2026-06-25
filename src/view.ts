@@ -1,4 +1,5 @@
 // 星环图谱视图 + 渲染逻辑（D3.js）
+
 import { ItemView, WorkspaceLeaf } from "obsidian";
 import type StarRingGraphPlugin from "./main";
 import * as d3 from "d3";
@@ -7,71 +8,24 @@ import type { RingNode } from "./data";
 
 export const STAR_RING_VIEW_TYPE = "star-ring-view";
 
-// 硬编码测试数据（先跑通视觉，后续接 data.ts 真实数据）
-const MOCK_DATA = {
-  name: "数学体系",
-  children: [
-    {
-      name: "第一章：极限",
-      children: [
-        { name: "MOC: 1.1 极限定义", type: "MOC", children: [
-          { name: "Frag: 等价无穷小替换", type: "Frag", children: [
-            { name: "Error: 0/0型化简错误", type: "Error" }
-          ]},
-          { name: "Frag: 洛必达使用条件", type: "Frag", children: [
-            { name: "Error: 洛必达法则误用", type: "Error" }
-          ]}
-        ]},
-        { name: "MOC: 1.2 连续性", type: "MOC", children: [
-          { name: "Frag: 间断点分类SOP", type: "Frag", children: [
-            { name: "Error: 间断点判断漏解", type: "Error" }
-          ]}
-        ]}
-      ]
-    },
-    {
-      name: "第二章：导数",
-      children: [
-        { name: "MOC: 2.1 导数定义", type: "MOC", children: [
-          { name: "Frag: 隐函数求导模板", type: "Frag", children: [
-            { name: "Error: 隐函数求导漏项", type: "Error" }
-          ]}
-        ]},
-        { name: "MOC: 2.2 微分法则", type: "MOC", children: [
-          { name: "Frag: 链式法则二级结论", type: "Frag", children: [
-            { name: "Error: 复合函数求导错", type: "Error" },
-            { name: "Error: 参数方程求导错", type: "Error" }
-          ]}
-        ]}
-      ]
-    },
-    {
-      name: "第三章：积分",
-      children: [
-        { name: "MOC: 3.1 积分基本法", type: "MOC", children: [
-          { name: "Frag: 换元法SOP", type: "Frag", children: [
-            { name: "Error: 凑微分漏系数", type: "Error" }
-          ]},
-          { name: "Frag: 分部积分模板", type: "Frag", children: [
-            { name: "Error: 分部积分循环错", type: "Error" }
-          ]}
-        ]}
-      ]
-    }
-  ]
+const WIDTH = 900, HEIGHT = 800;
+
+const RING_GAP = 200;
+const NODES_PER_RING = 6;
+
+const COLOR_MAP: Record<string, string> = {
+  root: "#7c5fff",
+  chapter: "#5297ff",
+  MOC: "#5297ff",
+  moc1: "#5297ff",
+  moc2: "#6ba3ff",
+  moc3: "#85afff",
+  moc4: "#9fbcff",
+  moc: "#5297ff",
+  Frag: "#f08c00",
+  Error: "#e05555"
 };
 
-const WIDTH = 900, HEIGHT = 800;
-const CENTER = { x: WIDTH / 2, y: HEIGHT / 2 };
-const RING_GAP = 130;                                   // 相邻环间距（增大，给每层足够周长）
-const NODES_PER_RING = 8;                               // 每环最多节点数，超出开新环
-const BASE_RADIUS_MAP: Record<string, number> = { MOC: 160, Frag: 290, Error: 390 };
-const COLOR_MAP: Record<string, string> = {
-  root: "#7c5fff", chapter: "#5297ff",
-  moc1: "#5297ff", moc2: "#6ba3ff", moc3: "#85afff", moc4: "#9fbcff",
-  moc: "#5297ff",
-  Frag: "#f08c00", Error: "#e05555"
-};
 const BG_FILL_MAP: Record<string, string> = {
   moc: "rgba(82, 151, 255, 0.07)",
   moc1: "rgba(82, 151, 255, 0.07)",
@@ -82,21 +36,76 @@ const BG_FILL_MAP: Record<string, string> = {
   Error: "rgba(224, 85, 85, 0.07)"
 };
 
-// 类型在环上的排列顺序（内到外）：root < chapter < moc1 < moc2 < ... < Frag < Error
-// 动态生成：扫描数据里出现的所有 type，排序后依次分配半径
+// ========== 工具函数 ==========
 
-// 计算动态轨道布局：返回每节点实际半径 + 每种类型的半径范围
-function computeRingLayout(root: any) {
-  // 收集所有非 root/chapter 的 type
-  const typeNodes: Record<string, any[]> = {};
-  root.descendants().forEach((n: any) => {
-    const t = n.data.type;
+function countLeaves(node: d3.HierarchyNode<RingNode>): number {
+  if (!node.children || node.children.length === 0) return 1;
+  return d3.sum(node.children, d => countLeaves(d));
+}
+
+function getNodeType(d: d3.HierarchyNode<RingNode>): string {
+  return d.data.type || "";
+}
+
+// 按子树大小分配扇区角度：节点多的章节占的角度大
+function assignByChapterSector(root: d3.HierarchyNode<RingNode>) {
+  const chapters = root.children || [];
+  const n = chapters.length;
+  if (n === 0) {
+    (root as any)._angle = 0;
+    return;
+  }
+
+  const FULL = 2 * Math.PI;
+  const SECTOR_GAP = 10 * Math.PI / 180;
+  const totalGap = n > 1 ? (n - 1) * SECTOR_GAP : 0;
+  const availableAngle = FULL - totalGap;
+
+  const weights = chapters.map(d => Math.max(countLeaves(d), 1));
+  const totalWeight = d3.sum(weights);
+
+  let cursor = -Math.PI / 2;
+
+  chapters.forEach((chapter, i) => {
+    const weight = weights[i];
+    const sectorWidth = (weight / totalWeight) * availableAngle;
+    assignSectorAngles(chapter, cursor, sectorWidth);
+    cursor += sectorWidth + SECTOR_GAP;
+  });
+
+  (root as any)._angle = 0;
+}
+
+// 递归分配：父节点在扇区中心，子节点按子树大小瓜分扇区
+function assignSectorAngles(node: d3.HierarchyNode<RingNode>, startAngle: number, sectorWidth: number) {
+  (node as any)._angle = startAngle + sectorWidth / 2;
+
+  if (!node.children || node.children.length === 0) return;
+
+  const children = node.children;
+  const weights = children.map(d => Math.max(countLeaves(d), 1));
+  const totalWeight = d3.sum(weights);
+
+  let cursor = startAngle;
+  children.forEach((child, i) => {
+    const weight = weights[i];
+    const childWidth = sectorWidth * (weight / totalWeight);
+    assignSectorAngles(child, cursor, childWidth);
+    cursor += childWidth;
+  });
+}
+
+// 计算每种类型节点的半径范围
+function computeRingLayout(root: d3.HierarchyNode<RingNode>) {
+  const typeNodes: Record<string, d3.HierarchyNode<RingNode>[]> = {};
+
+  root.descendants().forEach(n => {
+    const t = getNodeType(n);
     if (!t || t === "root" || t === "chapter") return;
     if (!typeNodes[t]) typeNodes[t] = [];
     typeNodes[t].push(n);
   });
 
-  // type 排序：moc1 < moc2 < ... < Frag < Error
   const typeOrder = Object.keys(typeNodes).sort((a, b) => {
     const rank = (t: string) => {
       if (t.startsWith("moc")) return parseInt(t.slice(3)) || 1;
@@ -107,92 +116,64 @@ function computeRingLayout(root: any) {
     return rank(a) - rank(b);
   });
 
-  // 起始半径（chapter 在 70，moc1 从 160 起）
-  const CHAPTER_RADIUS = 70;
   const FIRST_RING = 160;
   let cursorR = FIRST_RING;
   const typeRadii: Record<string, { minR: number; maxR: number }> = {};
 
-  typeOrder.forEach((type) => {
+  typeOrder.forEach(type => {
     const nodes = typeNodes[type];
+    // 按角度排序，同一环上的节点按圆周顺序排列，减少连线交叉
+    nodes.sort((a, b) => ((a as any)._angle || 0) - ((b as any)._angle || 0));
+
     const ringCount = Math.max(1, Math.ceil(nodes.length / NODES_PER_RING));
     const minR = cursorR;
     const maxR = minR + (ringCount - 1) * RING_GAP;
     typeRadii[type] = { minR, maxR };
-    nodes.forEach((n: any, i: number) => {
+
+    nodes.forEach((n, i) => {
       const ringIdx = Math.floor(i / NODES_PER_RING);
-      n._actualRadius = minR + ringIdx * RING_GAP;
+      (n as any)._actualRadius = minR + ringIdx * RING_GAP;
     });
-    cursorR = maxR + RING_GAP;  // 下一个 type 从这里开始
+
+    cursorR = maxR + RING_GAP;
   });
 
   return typeRadii;
 }
 
-// 按章节扇形分配：每个章节占一个扇区，章内从外向内均匀展开
-// 扇区等分 + 留间隔（呼吸感），章内各 depth 在扇区内均匀分布
-function assignByChapterSector(root: any) {
-  const chapters = root.children || [];
-  const n = chapters.length;
-  if (n === 0) return;
+// 把角度和半径转成笛卡尔坐标
+function computeNodePositions(
+  root: d3.HierarchyNode<RingNode>,
+  typeRadii: Record<string, { minR: number; maxR: number }>
+) {
+  const ROOT_RADIUS = 30;
 
-  const FULL = 2 * Math.PI;
-  const SECTOR_GAP = 10 * Math.PI / 180;   // 扇区间隔 10°（呼吸感）
-  const totalGap = n > 1 ? (n - 1) * SECTOR_GAP : 0;
-  const sectorWidth = (FULL - totalGap) / n;
+  root.each(d => {
+    const anyD = d as any;
 
-  let cursor = -Math.PI / 2;  // 从顶部开始
-  chapters.forEach((chapter: any, ci: number) => {
-    const startAngle = cursor;
-    assignSectorAngles(chapter, startAngle, sectorWidth);
-    cursor += sectorWidth + SECTOR_GAP;
+    if (d.depth === 0) {
+      anyD.radius = ROOT_RADIUS;
+      anyD.cartX = 0;
+      anyD.cartY = 0;
+      anyD.x = 0;
+      anyD.y = 0;
+      return;
+    }
+
+    if (d.depth === 1) {
+      anyD.radius = 70;
+    } else if (anyD._actualRadius) {
+      anyD.radius = anyD._actualRadius;
+    } else {
+      anyD.radius = ROOT_RADIUS;
+    }
+
+    const angle = anyD._angle != null ? anyD._angle : 0;
+    anyD.cartX = anyD.radius * Math.cos(angle);
+    anyD.cartY = anyD.radius * Math.sin(angle);
+    anyD.x = anyD.cartX;
+    anyD.y = anyD.cartY;
   });
-  root._angle = 0;  // 根节点中心
-}
-
-// 单个章节扇区内，从外向内均匀分配角度
-function assignSectorAngles(chapterNode: any, startAngle: number, sectorWidth: number) {
-  // 章节节点自己放在扇区中心
-  chapterNode._angle = startAngle + sectorWidth / 2;
-
-  // 收集该章节子树（不含章节本身）按 depth 分桶
-  const descendants = chapterNode.descendants ? chapterNode.descendants() : [];
-  const subtree = descendants.filter((d: any) => d !== chapterNode);
-  if (subtree.length === 0) return;
-
-  const byDepth: Record<number, any[]> = {};
-  let maxDepth = 0;
-  subtree.forEach((d: any) => {
-    if (!byDepth[d.depth]) byDepth[d.depth] = [];
-    byDepth[d.depth].push(d);
-    if (d.depth > maxDepth) maxDepth = d.depth;
-  });
-
-  const minDepth = chapterNode.depth + 1;  // 章节下一层开始
-
-  // 从最外层向内：在该章节扇区内均匀分布
-  for (let depth = maxDepth; depth >= minDepth; depth--) {
-    const nodes = byDepth[depth];
-    if (!nodes || nodes.length === 0) continue;
-
-    // 排序：按子节点平均角度（让父对齐子，减少连线斜跨）
-    nodes.sort((a: any, b: any) => avgChildAngle(a) - avgChildAngle(b));
-
-    // 在扇区内均匀分布
-    const m = nodes.length;
-    nodes.forEach((node: any, i: number) => {
-      node._angle = startAngle + (i + 0.5) / m * sectorWidth;
-    });
-  }
-}
-
-// 计算节点所有子节点的平均角度（用于排序对齐）
-function avgChildAngle(node: any): number {
-  if (!node.children || node.children.length === 0) {
-    return node._angle != null ? node._angle : 0;
-  }
-  const angles = node.children.map((c: any) => avgChildAngle(c));
-  return angles.reduce((a: number, b: number) => a + b, 0) / angles.length;
 }
 
 export class StarRingView extends ItemView {
@@ -212,6 +193,7 @@ export class StarRingView extends ItemView {
     container.empty();
     container.addClass("star-ring-view");
     container.createEl("div", { text: "加载数据中..." }).style.color = "#888";
+
     try {
       const treeData = await buildChapterTree(this.app, this.plugin.settings);
       this.renderGraph(container, treeData);
@@ -222,17 +204,13 @@ export class StarRingView extends ItemView {
     }
   }
 
-  async onClose() {
-    // 清理
-  }
+  async onClose() {}
 
   renderGraph(container: HTMLElement, treeData: RingNode) {
-    // 自适应容器尺寸
     const rect = container.getBoundingClientRect();
     const w = Math.max(400, rect.width || WIDTH);
     const h = Math.max(400, rect.height || HEIGHT);
     const center = { x: w / 2, y: h / 2 };
-    const ROOT_RADIUS = 30;   // 根节点轨道半径（最内）
 
     const svg = d3.select(container).append("svg")
       .attr("id", "star-ring-svg")
@@ -242,187 +220,255 @@ export class StarRingView extends ItemView {
       .attr("preserveAspectRatio", "xMidYMid meet")
       .style("cursor", "grab");
 
-    // 主 g：承载所有内容，被 zoom 行为控制
-    const g = svg.append("g").attr("class", "star-ring-content")
+    // 定义滤镜和渐变
+    const defs = svg.append("defs");
+
+    // 节点发光滤镜
+    const glowFilter = defs.append("filter")
+      .attr("id", "node-glow")
+      .attr("x", "-50%")
+      .attr("y", "-50%")
+      .attr("width", "200%")
+      .attr("height", "200%");
+    glowFilter.append("feGaussianBlur")
+      .attr("stdDeviation", "2.5")
+      .attr("result", "coloredBlur");
+    const feMerge = glowFilter.append("feMerge");
+    feMerge.append("feMergeNode").attr("in", "coloredBlur");
+    feMerge.append("feMergeNode").attr("in", "SourceGraphic");
+
+    const g = svg.append("g")
+      .attr("class", "star-ring-content")
       .attr("transform", `translate(${center.x},${center.y})`);
 
-    // d3-zoom：滚轮缩放 + 拖拽平移（rAF 节流避免卡顿）
-    const TEXT_HIDE_THRESHOLD = 0.6;
+    // Zoom：滚轮缩放 + Ctrl 拖拽平移
     let zoomRaf = 0;
     const applyZoom = (transform: d3.ZoomTransform) => {
-      if (zoomRaf) return;  // 已有帧在排队，跳过
+      if (zoomRaf) cancelAnimationFrame(zoomRaf);
       zoomRaf = requestAnimationFrame(() => {
         zoomRaf = 0;
         g.attr("transform", transform.toString());
-        g.classed("hide-text", transform.k < TEXT_HIDE_THRESHOLD);
+        const k = transform.k;
+        g.classed("zoom-far", k < 0.5);
+        g.classed("zoom-mid", k >= 0.5 && k < 1.5);
+        g.classed("zoom-close", k >= 1.5);
       });
     };
+
     const zoom = d3.zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.2, 5])
       .wheelDelta((event: any) => -event.deltaY * (event.deltaMode === 1 ? 0.2 : 0.01))
-      // 滚轮缩放始终可用；拖拽平移只在按住 Ctrl 时触发（避免与节点拖拽冲突）
       .filter((event: any) => {
-        if (event.type === "wheel") return true;           // 滚轮：始终缩放
-        return event.ctrlKey || event.metaKey;              // 鼠标拖拽：仅 Ctrl 时平移画布
+        if (event.type === "wheel") return true;
+        return event.ctrlKey || event.metaKey;
       })
       .on("zoom", (event) => applyZoom(event.transform));
 
-    svg.call(zoom)
-      .on("dblclick.zoom", null);
+    svg.call(zoom).on("dblclick.zoom", null);
 
     const initialTransform = d3.zoomIdentity.translate(center.x, center.y);
     svg.call(zoom.transform, initialTransform);
 
-    // 0. 先构建层级 + 算动态轨道布局
+    // ========== 布局计算 ==========
     const root = d3.hierarchy(treeData as any);
 
-    // 0.1 从外向内的扇形角度分配（每层均匀 360°，外层优先不挤压）
     assignByChapterSector(root);
-
     const typeRadii = computeRingLayout(root);
+    computeNodePositions(root, typeRadii);
 
-    // 1. 分色背景区域（动态遍历所有 type，按出现顺序）
-    const typeKeys = Object.keys(typeRadii);
+    // ========== 背景环 ==========
+    const typeKeys = Object.keys(typeRadii).sort((a, b) => typeRadii[a].minR - typeRadii[b].minR);
+
     const getAnnulusPath = (r1: number, r2: number) =>
-      `M ${-r1},0 a ${r1},${r1} 0 1,0 ${r1*2},0 a ${r1},${r1} 0 1,0 ${-r1*2},0 
-       M ${-r2},0 a ${r2},${r2} 0 1,1 ${r2*2},0 a ${r2},${r2} 0 1,1 ${-r2*2},0 Z`;
+      `M ${-r1},0 a ${r1},${r1} 0 1,0 ${r1 * 2},0 a ${r1},${r1} 0 1,0 ${-r1 * 2},0
+       M ${-r2},0 a ${r2},${r2} 0 1,1 ${r2 * 2},0 a ${r2},${r2} 0 1,1 ${-r2 * 2},0 Z`;
 
     typeKeys.forEach((type, i) => {
       const { minR, maxR } = typeRadii[type];
       const fill = BG_FILL_MAP[type] || BG_FILL_MAP["moc"];
       if (i === 0) {
-        // 最内 type：实心圆（到中心）
-        g.append("circle").attr("class", "bg-region").attr("r", maxR).attr("fill", fill);
+        g.append("circle")
+          .attr("class", "bg-region")
+          .attr("r", maxR)
+          .attr("fill", fill);
       } else {
-        // 外层：环形（前一 type 外缘 到 当前外缘）
         const prev = typeRadii[typeKeys[i - 1]].maxR;
-        g.append("path").attr("class", "bg-region")
+        g.append("path")
+          .attr("class", "bg-region")
           .attr("d", getAnnulusPath(maxR, prev))
-          .attr("fill", fill).attr("fill-rule", "evenodd");
+          .attr("fill", fill)
+          .attr("fill-rule", "evenodd");
       }
     });
 
-    // 2. 轨道虚线（根 + 章 + 各类型每个环）
-    const allRadii = [ROOT_RADIUS, 70];
+    // ========== 轨道虚线 ==========
+    const allRadii = [30, 70];
     typeKeys.forEach(type => {
       const { minR, maxR } = typeRadii[type];
       for (let r = minR; r <= maxR + 0.1; r += RING_GAP) {
         allRadii.push(r);
       }
     });
+
     allRadii.forEach(r => {
-      g.append("circle").attr("class", "ring-circle bg-region").attr("r", r);
-    });
-    // 标签（只标三个主要的）
-    if (typeRadii["moc1"]) g.append("text").attr("class", "ring-label").attr("y", -typeRadii["moc1"].minR + 25).text("内环 · MOC");
-    if (typeRadii["Frag"]) g.append("text").attr("class", "ring-label").attr("y", -typeRadii["Frag"].minR + 25).text("中环 · 碎片");
-    if (typeRadii["Error"]) g.append("text").attr("class", "ring-label").attr("y", -typeRadii["Error"].minR + 25).text("外环 · 错题");
-
-    // 3. 按 type 设半径，算笛卡尔坐标（_angle 已是绝对角度，从顶部起）
-    (root as any).each((d: any) => {
-      if (d.depth === 0) { d.radius = ROOT_RADIUS; d.cartX = 0; d.cartY = 0; d.x = 0; d.y = 0; return; }
-      if (d.depth === 1) { d.radius = 70; }
-      else if (d._actualRadius) { d.radius = d._actualRadius; }
-      const angle = d._angle != null ? d._angle : 0;
-      d.cartX = d.radius * Math.cos(angle);
-      d.cartY = d.radius * Math.sin(angle);
-      d.x = d.cartX;
-      d.y = d.cartY;
+      g.append("circle")
+        .attr("class", "ring-circle bg-region")
+        .attr("r", r);
     });
 
-    // 5. 连线（章→MOC 及更深，排除根→章，章之间不连线）
-    const visibleLinks = (root as any).links().filter((l: any) =>
-      l.source.depth >= 1 && l.target.depth >= 1
-    );
-    const link = g.append("g").selectAll("line")
+    // ========== 环标签 ==========
+    if (typeRadii["moc1"]) {
+      g.append("text")
+        .attr("class", "ring-label")
+        .attr("y", -typeRadii["moc1"].minR + 25)
+        .text("内环 · MOC");
+    }
+    if (typeRadii["Frag"]) {
+      g.append("text")
+        .attr("class", "ring-label")
+        .attr("y", -typeRadii["Frag"].minR + 25)
+        .text("中环 · 碎片");
+    }
+    if (typeRadii["Error"]) {
+      g.append("text")
+        .attr("class", "ring-label")
+        .attr("y", -typeRadii["Error"].minR + 25)
+        .text("外环 · 错题");
+    }
+
+    // ========== 黑色蒙版层（HTML div，支持毛玻璃 backdrop-filter）==========
+    // 独立于 SVG：盖在整张图谱之上，高亮时淡入。SVG rect 不支持 backdrop-filter，故用 div。
+    const overlay = document.createElement("div");
+    overlay.className = "interact-overlay";
+    container.appendChild(overlay);
+
+    // ========== 连线（贝塞尔曲线） ==========
+    const visibleLinks = root.links().filter(l => l.source.depth >= 1 && l.target.depth >= 1);
+
+    const linkPath = (d: any) => {
+      const sx = d.source.x, sy = d.source.y;
+      const tx = d.target.x, ty = d.target.y;
+      const mx = (sx + tx) / 2;
+      const my = (sy + ty) / 2;
+      // 控制点向圆心方向弯曲，让连线顺着环走
+      const bend = 0.3;
+      const cx = mx * (1 - bend);
+      const cy = my * (1 - bend);
+      return `M ${sx},${sy} Q ${cx},${cy} ${tx},${ty}`;
+    };
+
+    const link = g.append("g").selectAll("path")
       .data(visibleLinks)
-      .join("line")
+      .join("path")
       .attr("class", "link")
-      .attr("x1", (d: any) => d.source.x)
-      .attr("y1", (d: any) => d.source.y)
-      .attr("x2", (d: any) => d.target.x)
-      .attr("y2", (d: any) => d.target.y);
+      .attr("d", linkPath);
 
-    // 6. 节点（depth>=2）
-    const visibleNodes = (root as any).descendants().filter((n: any) => n.depth >= 2);
+    // ========== 普通节点（depth >= 2） ==========
+    const visibleNodes = root.descendants().filter(n => n.depth >= 2);
+
     const node = g.append("g").selectAll("g")
       .data(visibleNodes)
       .join("g")
       .attr("class", "node")
-      .attr("transform", (d: any) => `translate(${d.cartX},${d.cartY})`);
+      .attr("transform", (d: any) => `translate(${d.cartX},${d.cartY})`)
+      .style("cursor", "pointer");
 
-    // 命中圆：透明，比可见圆大很多，扩大点击区
+    // 命中区：扩大点击范围
     node.append("circle")
       .attr("class", "hit-area")
       .attr("r", 16)
       .attr("fill", "transparent");
 
-    // 可见圆
+    // 可见圆：大小随子树叶子数变化
     node.append("circle")
-      .attr("r", (d: any) => d.data.type === "MOC" ? 7 : (d.data.type === "Frag" ? 5 : 4))
-      .attr("fill", (d: any) => COLOR_MAP[d.data.type] || "#888");
+      .attr("class", "node-circle")
+      .attr("r", (d: any) => {
+        const type = getNodeType(d);
+        const base = type === "MOC" ? 7 : (type === "Frag" ? 5 : 4);
+        const leaves = countLeaves(d);
+        return base + Math.min(leaves * 0.5, 4);
+      })
+      .attr("fill", (d: any) => COLOR_MAP[getNodeType(d)] || "#888")
+      .attr("filter", "url(#node-glow)");
 
+    // 文字标签：沿半径方向摆放
     node.append("text")
-      .attr("dy", (d: any) => d.cartY > 0 ? 15 : -10)
-      .attr("text-anchor", "middle")
+      .attr("class", "node-label")
+      .attr("data-type", (d: any) => getNodeType(d))
+      .attr("x", (d: any) => Math.cos(d._angle || 0) * 12)
+      .attr("y", (d: any) => Math.sin(d._angle || 0) * 12 + 4)
+      .attr("text-anchor", (d: any) => Math.cos(d._angle || 0) >= 0 ? "start" : "end")
       .text((d: any) => d.data.name);
 
-    // 7. 章节节点（depth=1，内环，固定不参与力导向）
-    const chapters = (root as any).descendants().filter((n: any) => n.depth === 1);
+    // ========== 章节节点（depth = 1） ==========
+    const chapters = root.descendants().filter(n => n.depth === 1);
+
     const chapterNodes = g.append("g").selectAll("g")
       .data(chapters)
       .join("g")
       .attr("class", "node chapter-node")
-      .attr("transform", (d: any) => `translate(${d.cartX},${d.cartY})`);
+      .attr("transform", (d: any) => `translate(${d.cartX},${d.cartY})`)
+      .style("cursor", "pointer");
+
     chapterNodes.append("circle")
-      .attr("r", 8)
+      .attr("r", (d: any) => 8 + Math.min(countLeaves(d) * 0.3, 6))
       .attr("fill", "#5297ff")
       .attr("stroke", "#1e1e1e")
-      .attr("stroke-width", 2);
+      .attr("stroke-width", 2)
+      .attr("filter", "url(#node-glow)");
+
     chapterNodes.append("text")
       .attr("class", "chapter-label")
       .attr("dy", (d: any) => d.cartY > 0 ? 18 : -12)
       .attr("text-anchor", "middle")
       .text((d: any) => d.data.name);
 
-    // 7.5 根节点（depth=0，最内，中心点）
+    // ========== 根节点（depth = 0） ==========
     const rootNodes = g.append("g").selectAll("g")
       .data([root])
       .join("g")
       .attr("class", "node root-node")
-      .attr("transform", "translate(0,0)");
+      .attr("transform", "translate(0,0)")
+      .style("cursor", "pointer");
+
     rootNodes.append("circle")
-      .attr("r", 10)
-      .attr("fill", "#5297ff")
+      .attr("r", 12)
+      .attr("fill", "#7c5fff")
       .attr("stroke", "#1e1e1e")
-      .attr("stroke-width", 2);
+      .attr("stroke-width", 2)
+      .attr("filter", "url(#node-glow)");
+
     rootNodes.append("text")
       .attr("class", "chapter-label")
-      .attr("dy", -16)
+      .attr("dy", -20)
       .attr("text-anchor", "middle")
       .text((d: any) => d.data.name);
 
-    // 高亮函数：只高亮"当前节点到根的路径 + 当前节点的子树"，其余暗化
-    // connected 含根节点(depth=0)和章节点(depth=1)
+    // ========== 高亮交互 ==========
     const highlightPath = (d: any) => {
       g.classed("interacting", true);
       const connected = new Set<any>(d.ancestors());
       d.descendants().forEach((desc: any) => connected.add(desc));
-      // 纳入 depth>=0 的节点（含根节点）
+
       const visibleConnected = new Set([...connected].filter((n: any) => n.depth >= 0));
       const connectedLinks = new Set<any>();
-      visibleLinks.forEach((l: any) => {
-        if (visibleConnected.has(l.source) && visibleConnected.has(l.target)) connectedLinks.add(l);
+
+      visibleLinks.forEach(l => {
+        if (visibleConnected.has(l.source) && visibleConnected.has(l.target)) {
+          connectedLinks.add(l);
+        }
       });
+
       node.classed("node-active", (n: any) => visibleConnected.has(n))
-          .classed("node-dimmed", (n: any) => !visibleConnected.has(n));
+        .classed("node-dimmed", (n: any) => !visibleConnected.has(n));
       chapterNodes.classed("node-active", (n: any) => visibleConnected.has(n))
-                  .classed("node-dimmed", (n: any) => !visibleConnected.has(n));
+        .classed("node-dimmed", (n: any) => !visibleConnected.has(n));
       rootNodes.classed("node-active", (n: any) => visibleConnected.has(n))
-                .classed("node-dimmed", (n: any) => !visibleConnected.has(n));
+        .classed("node-dimmed", (n: any) => !visibleConnected.has(n));
       link.classed("link-active", (l: any) => connectedLinks.has(l))
-          .classed("link-dimmed", (l: any) => !connectedLinks.has(l));
+        .classed("link-dimmed", (l: any) => !connectedLinks.has(l));
     };
+
     const clearHighlight = () => {
       g.classed("interacting", false);
       node.classed("node-active", false).classed("node-dimmed", false);
@@ -431,21 +477,21 @@ export class StarRingView extends ItemView {
       link.classed("link-active", false).classed("link-dimmed", false);
     };
 
-    // 9. hover 高亮链路 —— 普通节点 + 章节点 + 根节点
-    node.on("mouseover", function (event: any, d: any) {
-      highlightPath(d);
-    }).on("mouseout", function () {
-      clearHighlight();
-    });
-    chapterNodes.on("mouseover", function (event: any, d: any) {
-      highlightPath(d);
-    }).on("mouseout", function () {
-      clearHighlight();
-    });
-    rootNodes.on("mouseover", function (event: any, d: any) {
-      highlightPath(d);
-    }).on("mouseout", function () {
-      clearHighlight();
-    });
+    // ========== 绑定事件：hover + 点击打开笔记 ==========
+    const bindEvents = (selection: any) => {
+      selection
+        .on("mouseover", (event: any, d: any) => highlightPath(d))
+        .on("mouseout", clearHighlight)
+        .on("click", (event: any, d: any) => {
+          const filePath = d.data ? d.data._filePath : d._filePath;
+          if (filePath) {
+            this.app.workspace.openLinkText(filePath, "");
+          }
+        });
+    };
+
+    bindEvents(node);
+    bindEvents(chapterNodes);
+    bindEvents(rootNodes);
   }
 }
