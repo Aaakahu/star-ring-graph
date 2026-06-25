@@ -1,0 +1,134 @@
+/* 星环图谱视图样式（迁移自 HTML 原型） */
+.star-ring-view {
+  background-color: #1e1e1e;
+  color: #e0e0e0;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  overflow: hidden;
+  padding: 0;
+  position: relative;
+}
+
+.star-ring-view svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: default;          /* 默认普通光标 */
+}
+
+.star-ring-view svg:active {
+  cursor: grabbing;         /* Ctrl+拖拽时抓手 */
+}
+
+/* 节点光标：可拖拽 */
+.star-ring-view .node {
+  cursor: grab;
+}
+
+/* 命中圆：完全隐形，仅用于扩大点击区 */
+.star-ring-view .node .hit-area {
+  fill: transparent;
+  stroke: none;
+  pointer-events: all;
+}
+
+.star-ring-view .node circle:not(.hit-area) {
+  stroke: #1e1e1e;
+  stroke-width: 2px;
+  pointer-events: none;
+  filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.15));
+  transition: all 0.2s ease;
+}
+
+/* 互动遮罩层：互动时显示，压暗整个背板 */
+.star-ring-view .interact-overlay {
+  fill: rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.star-ring-view .interacting .interact-overlay {
+  opacity: 1;
+}
+
+/* 缩放级别低时隐藏节点文字 */
+.star-ring-view .hide-text .node text {
+  display: none;
+}
+.star-ring-view .node text {
+  font-size: 11px;
+  font-weight: 300;            /* 调细 */
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+  fill: #909090;
+  paint-order: stroke;
+  stroke: #1e1e1e;
+  stroke-width: 1.5px;
+  stroke-linejoin: round;
+}
+
+.star-ring-view .link {
+  stroke: #4a4a4a;
+  stroke-opacity: 0.6;
+  stroke-width: 1.2px;
+  transition: all 0.2s ease;
+}
+
+/* active 节点/连线：不特殊高亮，保持原样，靠其他元素的 dimmed 衬托 */
+.star-ring-view .node-active circle {
+  stroke: #1e1e1e;
+  stroke-width: 2px;
+  filter: none;
+}
+.star-ring-view .node-active text {
+  fill: #909090;
+  font-weight: 300;
+}
+.star-ring-view .link-active {
+  stroke: #4a4a4a;
+  stroke-opacity: 0.6;
+  stroke-width: 1.2px;
+}
+
+/* 暗化节点：饱和度极低 + 文字消失 */
+.star-ring-view .node-dimmed {
+  opacity: 0.12;
+  filter: saturate(0);
+}
+.star-ring-view .node-dimmed text {
+  display: none;
+}
+.star-ring-view .link-dimmed { opacity: 0.03; }
+
+/* 互动时章节标签、轨道、分色背景全部暗化 */
+.star-ring-view .interacting .chapter-label,
+.star-ring-view .interacting .ring-label {
+  opacity: 0.2;
+}
+.star-ring-view .interacting .ring-circle {
+  stroke-opacity: 0.2;
+}
+.star-ring-view .interacting .bg-region {
+  opacity: 0.3;
+}
+
+/* 轨道虚线 */
+.star-ring-view .ring-circle {
+  fill: none;
+  stroke: #666;
+  stroke-width: 1px;
+  stroke-dasharray: 3 6;
+}
+.star-ring-view .ring-label {
+  font-size: 11px;
+  fill: #888;
+  text-anchor: middle;
+  font-weight: bold;
+  letter-spacing: 1px;
+}
+.star-ring-view .chapter-label {
+  font-size: 13px;
+  fill: #aaa;
+  text-anchor: middle;
+  font-weight: 400;           /* 调细（原 bold） */
+  pointer-events: none;
+}
