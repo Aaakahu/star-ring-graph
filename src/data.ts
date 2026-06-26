@@ -264,6 +264,7 @@ export interface G6Node {
   labelCfg?: any;
   _filePath?: string;
   _originalType?: string; // 保留原始类型信息
+  level?: number; // 层级：0=根, 1=章节, 2=MOC/知识点, 3=碎片, 4=错题
 }
 
 export interface G6Edge {
@@ -297,49 +298,58 @@ export function convertToG6Data(rootNode: RingNode): G6Data {
   const traverse = (node: RingNode, parentId: string | null = null) => {
     const nodeId = generateNodeId(node.name);
 
-    // 节点样式配置
-    const colorMap: Record<string, string> = {
-      root: "#7c5fff",
-      chapter: "#5297ff",
-      MOC: "#5297ff",
-      moc1: "#5297ff",
-      moc2: "#6ba3ff",
-      moc3: "#85afff",
-      moc4: "#9fbcff",
-      moc: "#5297ff",
-      Frag: "#f08c00",
-      Error: "#e05555"
+    // 按层级着色：0=根, 1=章节, 2=MOC/知识点, 3=碎片, 4=错题
+    let level = 0;
+    if (node.type === "root") level = 0;
+    else if (node.type === "chapter") level = 1;
+    else if (node.type === "MOC" || node.type.startsWith("moc")) level = 2;
+    else if (node.type === "Frag") level = 3;
+    else if (node.type === "Error") level = 4;
+    else level = 2;
+
+    // 按层级颜色映射
+    const levelColorMap: Record<number, { fill: string; stroke: string; shadowBlur: number }> = {
+      0: { fill: "#f0a94f", stroke: "#c4883f", shadowBlur: 12 }, // 根节点：金色
+      1: { fill: "#4f8ff7", stroke: "#3d7bd4", shadowBlur: 8 },  // 章节：蓝色
+      2: { fill: "#4fd1c5", stroke: "#3db8ad", shadowBlur: 0 },  // 知识点：青色
+      3: { fill: "#e06c75", stroke: "#c4555e", shadowBlur: 0 },  // 碎片：暗红
+      4: { fill: "#e06c75", stroke: "#c4555e", shadowBlur: 0 },  // 错题：暗红
     };
+
+    const color = levelColorMap[level] || levelColorMap[2];
 
     const g6Node: G6Node = {
       id: nodeId,
       label: node.name,
       type: "circle",
       style: {
-        fill: colorMap[node.type] || "#888",
-        stroke: "#1e1e1e",
-        lineWidth: 2
+        fill: color.fill,
+        stroke: color.stroke,
+        lineWidth: 2,
+        shadowColor: color.fill,
+        shadowBlur: color.shadowBlur,
       },
       labelCfg: {
         style: {
           fontSize: 10,
-          fill: "#333"
+          fill: "#e6edf3"
         }
       },
       _filePath: node._filePath,
-      _originalType: node.type
+      _originalType: node.type,
+      level: level, // 添加层级字段
     };
 
-    // 根据类型调整节点大小
-    if (node.type === "root") {
+    // 根据层级调整节点大小
+    if (level === 0) {
       g6Node.style!.size = 24;
-    } else if (node.type === "chapter") {
+    } else if (level === 1) {
       g6Node.style!.size = 16;
-    } else if (node.type === "MOC" || node.type.startsWith("moc")) {
+    } else if (level === 2) {
       g6Node.style!.size = 14;
-    } else if (node.type === "Frag") {
+    } else if (level === 3) {
       g6Node.style!.size = 10;
-    } else if (node.type === "Error") {
+    } else if (level === 4) {
       g6Node.style!.size = 8;
     }
 

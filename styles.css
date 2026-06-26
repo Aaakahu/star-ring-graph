@@ -1,12 +1,26 @@
 /* 星环图谱视图样式 */
 
 .star-ring-view {
-  background-color: #1e1e1e;
-  color: #e0e0e0;
+  background: radial-gradient(circle at center, #1a1f2e 0%, #0d1117 100%);
+  color: #e6edf3;
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
   overflow: hidden;
   padding: 0;
   position: relative;
+}
+
+.star-ring-view .g6-container canvas {
+  background: transparent !important;
+}
+
+/* 小地图样式 */
+.star-ring-view .star-ring-minimap {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  background: rgba(30, 30, 30, 0.8);
+  border: 1px solid #444;
+  border-radius: 6px;
 }
 
 .star-ring-view svg {

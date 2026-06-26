@@ -8,9 +8,67 @@ import type { RingNode, G6Data } from "./data";
 
 export const STAR_RING_VIEW_TYPE = "star-ring-view";
 
+// 注册换行节点类型
+const registerWrappedLabelNode = () => {
+  G6.registerNode('wrapped-label-node', {
+    draw(cfg: any, group: any) {
+      const size = cfg.size || 12;
+      const keyShape = group.addShape('circle', {
+        attrs: {
+          x: 0,
+          y: 0,
+          r: size / 2,
+          fill: cfg.style?.fill || '#C6E5FF',
+          stroke: cfg.style?.stroke || '#5B8FF9',
+          lineWidth: 2,
+        },
+        name: 'node-circle',
+      });
+
+      const maxWidth = 100;
+      const fontSize = 10;
+      const label = String(cfg.label || '');
+      
+      // 简易换行逻辑
+      const words = label.split('');
+      let line = '';
+      const lines: string[] = [];
+      for (let i = 0; i < words.length; i++) {
+        const testLine = line + words[i];
+        const width = testLine.length * fontSize * 0.6; // 中文字符估算
+        if (width > maxWidth && i > 0) {
+          lines.push(line);
+          line = words[i];
+        } else {
+          line = testLine;
+        }
+      }
+      lines.push(line);
+
+      lines.forEach((l, index) => {
+        group.addShape('text', {
+          attrs: {
+            x: 0,
+            y: size / 2 + 8 + index * (fontSize + 2),
+            text: l,
+            textAlign: 'center',
+            textBaseline: 'top',
+            fontSize: fontSize,
+            fill: '#e6edf3',
+            fontFamily: 'system-ui, -apple-system, sans-serif',
+          },
+          name: 'node-label',
+        });
+      });
+
+      return keyShape;
+    },
+  }, 'circle');
+};
+
 export class StarRingView extends ItemView {
   plugin: StarRingGraphPlugin;
-  graph: G6.Graph | null = null;
+  graph: any = null;
   container: HTMLElement | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: StarRingGraphPlugin) {
@@ -52,6 +110,9 @@ export class StarRingView extends ItemView {
   }
 
   renderGraph(container: HTMLElement, treeData: RingNode) {
+    // 注册自定义节点类型
+    registerWrappedLabelNode();
+    
     // 转换数据格式
     const g6Data: G6Data = convertToG6Data(treeData);
 
@@ -70,15 +131,19 @@ export class StarRingView extends ItemView {
       container: container,
       width: width,
       height: height,
+      fitView: true,
+      fitViewPadding: 40,
+      minZoom: 0.1,
+      maxZoom: 3,
       
       // 交互模式
       modes: {
         default: [
-          'drag-canvas',   // 允许拖拽画布
-          'zoom-canvas',   // 允许缩放画布
-          'drag-node',     // 允许手动微调节点
+          { type: 'drag-canvas', enableOptimize: true },
+          'zoom-canvas',
+          'drag-node',
           {
-            type: 'activate-relations', // 关联高亮
+            type: 'activate-relations',
             activeState: 'active',
             inactiveState: 'inactive',
             resetSelected: true,
@@ -89,87 +154,114 @@ export class StarRingView extends ItemView {
       // 布局配置：径向布局
       layout: {
         type: 'radial',
-        unitRadius: 100,         // 每一圈的半径距离
-        preventOverlap: true,    // 开启防止重叠
-        maxIteration: 1000,      // 静态计算的最大迭代次数
-        sortBy: 'data',          // 节点排序依据
+        unitRadius: 140,
+        preventOverlap: true,
+        maxIteration: 2000,
+        sortBy: 'data',
+        linkDistance: 100,
       },
       
-      // 节点状态样式
+      // 节点状态样式（带发光效果）
       nodeStateStyles: {
         active: {
-          opacity: 1,
           lineWidth: 3,
+          shadowColor: '#fff',
+          shadowBlur: 20,
         },
         inactive: {
-          opacity: 0.2, // 未关联节点变透明
+          opacity: 0.08,
         },
       },
       
-      // 边状态样式
+      // 边状态样式（带发光效果）
       edgeStateStyles: {
         active: {
-          opacity: 1,
+          stroke: '#a78bfa',
           lineWidth: 2,
+          shadowColor: '#a78bfa',
+          shadowBlur: 10,
+          opacity: 1,
         },
         inactive: {
-          opacity: 0.1,
+          opacity: 0.02,
         },
       },
       
       // 默认节点配置
       defaultNode: {
-        type: 'circle',
-        size: 20,
-        style: {
-          fill: '#C6E5FF',
-          stroke: '#5B8FF9',
-          lineWidth: 2,
-        },
-        labelCfg: {
-          style: {
-            fontSize: 10,
-            fill: '#333',
-          },
-        },
+        type: 'wrapped-label-node',
+        size: 12,
       },
       
       // 默认边配置
       defaultEdge: {
         type: 'cubic',
         style: {
-          stroke: '#999',
-          lineWidth: 1,
+          stroke: '#3d4f6f',
+          lineWidth: 0.8,
+          opacity: 0.35,
         },
       },
+      
+      // 插件：小地图
+      plugins: [
+        new G6.Minimap({
+          size: [150, 100],
+          className: 'star-ring-minimap',
+          type: 'keyShape',
+        }),
+      ],
     });
 
     // 加载数据并渲染
     this.graph.data(g6Data);
     this.graph.render();
 
-    // 视口变化事件：缩放小于 0.5 时隐藏标签
-    this.graph.on('viewportchange', (e) => {
-      if (this.graph && this.graph.getZoom() < 0.5) {
-        // 缩放小于 0.5 时隐藏文本标签，提升流畅度
-        this.graph.getNodes().forEach(node => {
-          node.update({ labelCfg: { style: { opacity: 0 } } });
-        });
-      } else {
-        this.graph.getNodes().forEach(node => {
-          node.update({ labelCfg: { style: { opacity: 1 } } });
-        });
-      }
+    // 视口变化事件：按层级控制标签显示
+    this.graph.on('viewportchange', () => {
+      if (!this.graph) return;
+      const zoom = this.graph.getZoom();
+      this.graph.getNodes().forEach(node => {
+        const model = node.getModel();
+        const level = model.level || 0;
+        let opacity = 0;
+        if (zoom >= 1.5) opacity = 1;
+        else if (zoom >= 0.8 && level <= 2) opacity = 1;
+        else if (zoom >= 0.5 && level <= 1) opacity = 1;
+        else if (zoom < 0.5 && level === 0) opacity = 1;
+        node.getContainer().find(element => element.get('name') === 'node-label')
+          ?.attr('opacity', opacity);
+      });
     });
 
-    // 节点点击事件：打开对应笔记
+    // 节点点击事件：自动居中放大 + 打开对应笔记
     this.graph.on('node:click', (evt) => {
       const node = evt.item;
       const model = node?.getModel();
+      
+      // 自动居中并放大到该节点
+      this.graph.focusItem(node, true, {
+        easing: 'easeCubic',
+        duration: 400,
+      });
+      this.graph.zoomTo(1.2, { x: model.x, y: model.y }, true, {
+        easing: 'easeCubic',
+        duration: 400,
+      });
+      
+      // 打开对应笔记
       const filePath = model?._filePath;
       if (filePath) {
         this.app.workspace.openLinkText(filePath, "");
       }
+    });
+    
+    // 空白处点击：重置视角
+    this.graph.on('canvas:click', () => {
+      this.graph.fitView(20, undefined, true, {
+        easing: 'easeCubic',
+        duration: 500,
+      });
     });
 
     console.log("[星环图谱] G6 图谱渲染完成，节点数:", g6Data.nodes.length, "边数:", g6Data.edges.length);
