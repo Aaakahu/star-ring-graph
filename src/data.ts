@@ -253,3 +253,118 @@ function collectMarkdownFiles(folder: TFolder, out: TFile[]) {
     }
   }
 }
+
+// ========== G6 数据转换 ==========
+
+export interface G6Node {
+  id: string;
+  label: string;
+  type?: string;
+  style?: any;
+  labelCfg?: any;
+  _filePath?: string;
+  _originalType?: string; // 保留原始类型信息
+}
+
+export interface G6Edge {
+  source: string;
+  target: string;
+  style?: any;
+}
+
+export interface G6Data {
+  nodes: G6Node[];
+  edges: G6Edge[];
+}
+
+// 将 RingNode 树结构转换为 G6 的 nodes/edges 格式
+export function convertToG6Data(rootNode: RingNode): G6Data {
+  const nodes: G6Node[] = [];
+  const edges: G6Edge[] = [];
+  const nodeIdMap = new Map<string, string>(); // name -> id
+
+  // 递归遍历树，生成节点和边
+  let nodeIdCounter = 0;
+  const generateNodeId = (name: string): string => {
+    if (nodeIdMap.has(name)) {
+      return nodeIdMap.get(name)!;
+    }
+    const id = `node_${nodeIdCounter++}`;
+    nodeIdMap.set(name, id);
+    return id;
+  };
+
+  const traverse = (node: RingNode, parentId: string | null = null) => {
+    const nodeId = generateNodeId(node.name);
+
+    // 节点样式配置
+    const colorMap: Record<string, string> = {
+      root: "#7c5fff",
+      chapter: "#5297ff",
+      MOC: "#5297ff",
+      moc1: "#5297ff",
+      moc2: "#6ba3ff",
+      moc3: "#85afff",
+      moc4: "#9fbcff",
+      moc: "#5297ff",
+      Frag: "#f08c00",
+      Error: "#e05555"
+    };
+
+    const g6Node: G6Node = {
+      id: nodeId,
+      label: node.name,
+      type: "circle",
+      style: {
+        fill: colorMap[node.type] || "#888",
+        stroke: "#1e1e1e",
+        lineWidth: 2
+      },
+      labelCfg: {
+        style: {
+          fontSize: 10,
+          fill: "#333"
+        }
+      },
+      _filePath: node._filePath,
+      _originalType: node.type
+    };
+
+    // 根据类型调整节点大小
+    if (node.type === "root") {
+      g6Node.style!.size = 24;
+    } else if (node.type === "chapter") {
+      g6Node.style!.size = 16;
+    } else if (node.type === "MOC" || node.type.startsWith("moc")) {
+      g6Node.style!.size = 14;
+    } else if (node.type === "Frag") {
+      g6Node.style!.size = 10;
+    } else if (node.type === "Error") {
+      g6Node.style!.size = 8;
+    }
+
+    nodes.push(g6Node);
+
+    // 如果有父节点，创建边
+    if (parentId) {
+      edges.push({
+        source: parentId,
+        target: nodeId,
+        style: {
+          stroke: "#999",
+          lineWidth: 1,
+          endArrow: false
+        }
+      });
+    }
+
+    // 递归处理子节点
+    if (node.children && node.children.length > 0) {
+      node.children.forEach(child => traverse(child, nodeId));
+    }
+  };
+
+  traverse(rootNode);
+
+  return { nodes, edges };
+}

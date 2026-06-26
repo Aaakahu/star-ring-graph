@@ -8,6 +8,7 @@
     "dev": "node esbuild.config.mjs"
   },
   "dependencies": {
+    "@antv/g6": "^4.8.24",
     "d3": "^7.9.0"
   },
   "devDependencies": {
