@@ -260,11 +260,16 @@ export interface G6Node {
   id: string;
   label: string;
   type?: string;
+  size?: number;
   style?: any;
   labelCfg?: any;
   _filePath?: string;
   _originalType?: string; // 保留原始类型信息
   level?: number; // 层级：0=根, 1=章节, 2=MOC/知识点, 3=碎片, 4=错题
+  chapterId?: string; // 所属章节节点 id（level≤1 用自身 id）
+  x?: number;
+  y?: number;
+  collapsed?: boolean;
 }
 
 export interface G6Edge {
@@ -295,7 +300,7 @@ export function convertToG6Data(rootNode: RingNode): G6Data {
     return id;
   };
 
-  const traverse = (node: RingNode, parentId: string | null = null) => {
+  const traverse = (node: RingNode, parentId: string | null = null, chapterId: string | null = null) => {
     const nodeId = generateNodeId(node.name);
 
     // 按层级着色：0=根, 1=章节, 2=MOC/知识点, 3=碎片, 4=错题
@@ -307,51 +312,53 @@ export function convertToG6Data(rootNode: RingNode): G6Data {
     else if (node.type === "Error") level = 4;
     else level = 2;
 
+    // level≤1 的节点（根/章节）作为自己后代归属的章节，向下传
+    const myChapter = level <= 1 ? nodeId : (chapterId || nodeId);
+
     // 按层级颜色映射
     const levelColorMap: Record<number, { fill: string; stroke: string; shadowBlur: number }> = {
       0: { fill: "#f0a94f", stroke: "#c4883f", shadowBlur: 12 }, // 根节点：金色
       1: { fill: "#4f8ff7", stroke: "#3d7bd4", shadowBlur: 8 },  // 章节：蓝色
       2: { fill: "#4fd1c5", stroke: "#3db8ad", shadowBlur: 0 },  // 知识点：青色
       3: { fill: "#e06c75", stroke: "#c4555e", shadowBlur: 0 },  // 碎片：暗红
-      4: { fill: "#e06c75", stroke: "#c4555e", shadowBlur: 0 },  // 错题：暗红
+      4: { fill: "#c678dd", stroke: "#a35bb8", shadowBlur: 0 },  // 错题：粉紫（区别于碎片暗红）
     };
 
     const color = levelColorMap[level] || levelColorMap[2];
 
+    // 按层级差异化节点大小和文字
+    const levelConfig = [
+      { size: 32, font: 13, opacity: 1 },      // 0 根
+      { size: 22, font: 10, opacity: 1 },       // 1 章节
+      { size: 14, font: 9, opacity: 0.85 },    // 2 知识点
+      { size: 9, font: 0, opacity: 0 },         // 3 碎片/错题默认隐藏文字
+    ][Math.min(level, 3)];
+
     const g6Node: G6Node = {
       id: nodeId,
       label: node.name,
-      type: "circle",
+      // ponytail: 不设 type，让 G6 的 defaultNode.type('wrapped-label-node') 生效；否则硬编码 circle 会覆盖它
+      size: levelConfig.size,
       style: {
         fill: color.fill,
         stroke: color.stroke,
-        lineWidth: 2,
+        lineWidth: level <= 1 ? 2 : 1,
         shadowColor: color.fill,
         shadowBlur: color.shadowBlur,
       },
       labelCfg: {
         style: {
-          fontSize: 10,
-          fill: "#e6edf3"
-        }
+          fontSize: levelConfig.font,
+          fill: "#d0d0d0",
+          opacity: levelConfig.opacity,
+        },
+        position: 'bottom',
       },
       _filePath: node._filePath,
       _originalType: node.type,
       level: level, // 添加层级字段
+      chapterId: myChapter, // 扇区布局按此归扇区
     };
-
-    // 根据层级调整节点大小
-    if (level === 0) {
-      g6Node.style!.size = 24;
-    } else if (level === 1) {
-      g6Node.style!.size = 16;
-    } else if (level === 2) {
-      g6Node.style!.size = 14;
-    } else if (level === 3) {
-      g6Node.style!.size = 10;
-    } else if (level === 4) {
-      g6Node.style!.size = 8;
-    }
 
     nodes.push(g6Node);
 
@@ -368,9 +375,9 @@ export function convertToG6Data(rootNode: RingNode): G6Data {
       });
     }
 
-    // 递归处理子节点
+    // 递归处理子节点（把当前章节 id 传下去）
     if (node.children && node.children.length > 0) {
-      node.children.forEach(child => traverse(child, nodeId));
+      node.children.forEach(child => traverse(child, nodeId, myChapter));
     }
   };
 

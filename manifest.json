@@ -1,7 +1,7 @@
 {
   "id": "star-ring-graph",
   "name": "星环图谱",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minAppVersion": "1.4.0",
   "description": "按 MOC/碎片/错题三层星环展示知识体系，hover 高亮溯源链路",
   "author": "study-guide",
