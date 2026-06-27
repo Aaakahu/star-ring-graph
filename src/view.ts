@@ -91,6 +91,81 @@ function starRingSectorLayout(nodes: any[], edges: any[], baseRadius = 140, minA
   }
 }
 
+// 鱼骨主干布局：level 0/1 横向铺主干，level 2(MoC) 斜下分刺，level≥3(碎片/错题) 围父节点成星团
+// ponytail: 复用已有 level + _originalType，不重解析文件名；parent 从 edges 反查
+function fishboneLayout(nodes: any[], edges: any[], step = 180, spurLen = 90, clusterR = 35) {
+  if (nodes.length === 0) return;
+  const byId = new Map<string, any>(nodes.map(n => [n.id, n]));
+  // edges: source=parent, target=child
+  const childrenOf = new Map<string, any[]>();
+  edges.forEach(e => {
+    if (!childrenOf.has(e.source)) childrenOf.set(e.source, []);
+    childrenOf.get(e.source)!.push(byId.get(e.target)!);
+  });
+  // 父节点表（找直接父节点 + 根节点集合）
+  const parentOf = new Map<string, string>();
+  edges.forEach(e => { if (byId.has(e.target)) parentOf.set(e.target, e.source); });
+
+  // 1. 主干：level 0/1 按 nodes 数组顺序（≈文件名前缀序）从左到右铺，Y=0
+  const spine = nodes.filter(n => (n.level ?? 0) <= 1);
+  if (spine.length === 0) {
+    // 兜底：无根/章节时把第一个节点放原点，其余随分支
+    spine.push(nodes[0]);
+    nodes[0].x = 0; nodes[0].y = 0;
+  }
+  spine.forEach((n, i) => { n.x = i * step; n.y = 0; });
+
+  // 2. 鱼骨刺：从父节点 ±45° 延伸（MoC 节点 + 进一步嵌套的 mocN）
+  // 同级子节点交替上下避免重叠；沿同方向链式递归
+  const placeSpur = (node: any, fromX: number, fromY: number, dir: number, depth: number) => {
+    const angle = dir > 0 ? Math.PI / 4 : -Math.PI / 4; // +45° / -45°
+    const reach = spurLen + depth * (spurLen * 0.5);     // 越深刺越长，拉开层次
+    node.x = fromX + Math.cos(angle) * reach;
+    node.y = fromY + Math.sin(angle) * reach;
+  };
+
+  // 3. 星团：level≥3 围父节点成小圆环（密度自适应半径）
+  const placeCluster = (parent: any) => {
+    const kids = (childrenOf.get(parent.id) || []).filter(k => (k.level ?? 0) >= 3);
+    if (kids.length === 0) return;
+    const r = Math.max(clusterR, (kids.length * 8) / (2 * Math.PI));
+    kids.forEach((k, i) => {
+      const a = (2 * Math.PI) * (kids.length === 1 ? 0 : i / kids.length);
+      k.x = (parent.x || 0) + Math.cos(a) * r;
+      k.y = (parent.y || 0) + Math.sin(a) * r;
+    });
+  };
+
+  // DFS：每个节点先放自己（刺），再处理 mocN 子孙（继续分刺），最后给本节点挂星团
+  const visited = new Set<string>();
+  const walk = (node: any, parent: any | null, dir: number, depth: number) => {
+    if (!node || visited.has(node.id)) return;
+    visited.add(node.id);
+    const lv = node.level ?? 0;
+    // 非主干节点需要显式定位（主干已在 step 1 铺好）
+    if (lv >= 2 && parent) {
+      placeSpur(node, parent.x || 0, parent.y || 0, dir, depth);
+    }
+    // 子节点：MoC 系继续分刺（交替方向），碎片/错题交给星团统一放
+    const mocKids = (childrenOf.get(node.id) || []).filter(k => (k.level ?? 0) === 2);
+    mocKids.forEach((k, i) => walk(k, node, i % 2 === 0 ? 1 : -1, depth + 1));
+    // 本节点的星团（碎片/错题）
+    if (lv >= 2) placeCluster(node);
+  };
+
+  // 从每个主干节点出发
+  spine.forEach(s => {
+    const mocKids = (childrenOf.get(s.id) || []).filter(k => (k.level ?? 0) === 2);
+    mocKids.forEach((k, i) => walk(k, s, i % 2 === 0 ? 1 : -1, 0));
+    // 主干节点自己也可能直接挂碎片/错题（无 MoC 中转）
+    placeCluster(s);
+  });
+
+  // 兜底：仍未定位的节点（孤儿/无父）铺到主干下方一行
+  const orphans = nodes.filter(n => n.x === undefined && n.y === undefined);
+  orphans.forEach((n, i) => { n.x = i * 60; n.y = 200; });
+}
+
 // 注册换行节点类型
 const registerWrappedLabelNode = () => {
   G6.registerNode('wrapped-label-node', {
@@ -195,6 +270,8 @@ export class StarRingView extends ItemView {
   container: HTMLElement | null = null;
   ctrlHeld = false; // 按住 Ctrl 时锁定链路高亮（阻止 activate-relations 的 deactivate）
   _cleanupKeyListeners: (() => void) | null = null;
+  g6Data: G6Data | null = null;           // 供 dblclick 折叠 BFS 用（修原 this.g6Data 未赋值 bug）
+  private _detailsVisible = false;        // 语义缩放状态：碎片/错题当前是否显示
 
   constructor(leaf: WorkspaceLeaf, plugin: StarRingGraphPlugin) {
     super(leaf);
@@ -267,9 +344,17 @@ export class StarRingView extends ItemView {
     
     // 转换数据格式
     const g6Data: G6Data = convertToG6Data(treeData);
+    this.g6Data = g6Data; // 供 dblclick 折叠 BFS 用（修原 this.g6Data 未赋值 bug）
 
-    // 扇区星环布局：直接把 x/y 写到节点上（不配 layout 字段，G6 v4.8 initPositions 保留已有坐标）
-    starRingSectorLayout(g6Data.nodes, g6Data.edges, 140, 42);
+    // 布局：设置可选 鱼骨主干 / 星环扇区，二者都直接预算 x/y 写回节点（不配 G6 layout 字段）
+    const layout = this.plugin.settings.layout ?? 'fishbone';
+    if (layout === 'fishbone') {
+      fishboneLayout(g6Data.nodes, g6Data.edges);
+    } else {
+      starRingSectorLayout(g6Data.nodes, g6Data.edges, 140, 42);
+    }
+    // 重建后重置语义缩放状态，让首次 applyLod 重新判定
+    this._detailsVisible = false;
 
     // 获取容器尺寸
     const rect = container.getBoundingClientRect();
@@ -456,21 +541,58 @@ export class StarRingView extends ItemView {
     });
   }
 
-  // 按当前缩放层级同步所有节点标题透明度
+  // 语义缩放：① 碎片/错题(level≥3) 可见性仅在跨阈值时翻转一次；
+  //          ② 标签透明度每次滚动都同步（廉价的 attr 突变）
   applyLod() {
     if (!this.graph) return;
     const zoom = this.graph.getZoom();
-    this.graph.getNodes().forEach(node => {
+    const detailZoom = this.plugin.settings.detailZoom ?? 1.5;
+
+    // ① 节点/边可见性 —— 仅在跨阈值时执行（避免每次滚动 updateItem 全图）
+    const shouldShow = zoom >= detailZoom;
+    if (shouldShow !== this._detailsVisible) {
+      this._detailsVisible = shouldShow;
+      this.graph.getNodes().forEach((node: any) => {
+        const model = node.getModel();
+        if ((model.level ?? 0) >= 3) {
+          this.graph.updateItem(node, { visible: shouldShow });
+        }
+      });
+      // 边同步：任一端点 level≥3 则跟随碎片/错题显隐
+      this.graph.getEdges().forEach((edge: any) => {
+        const sLv = edge.getSource()?.getModel()?.level ?? 0;
+        const tLv = edge.getTarget()?.getModel()?.level ?? 0;
+        if (sLv >= 3 || tLv >= 3) {
+          this.graph.updateItem(edge, { visible: shouldShow });
+        }
+      });
+    }
+
+    // ② 标签透明度 —— 每次都跑
+    this.graph.getNodes().forEach((node: any) => {
       const model = node.getModel();
       const level = model.level || 0;
       let opacity = 0;
-      if (zoom >= 1.5) opacity = 1;                              // 放大后全显示（含碎片/错题）
-      else if (zoom >= 0.8 && level <= 2) opacity = 1;           // 中等缩放：到知识点
-      else if (zoom >= 0.5 && level <= 1) opacity = 1;           // 小缩放：到章节
-      else if (zoom < 0.5 && level === 0) opacity = 1;           // 极小：只根节点
-      node.getContainer().find(e => e.get('name') === 'node-label')
+      if (zoom >= detailZoom) opacity = 1;                     // 放大后全显示（含碎片/错题）
+      else if (zoom >= 0.8 && level <= 2) opacity = 1;         // 中等缩放：到知识点
+      else if (zoom >= 0.5 && level <= 1) opacity = 1;         // 小缩放：到章节
+      else if (zoom < 0.5 && level === 0) opacity = 1;         // 极小：只根节点
+      node.getContainer().find((e: any) => e.get('name') === 'node-label')
         ?.attr('opacity', opacity);
     });
+  }
+
+  // 设置变更（布局切换 / 阈值调整）后重建图谱：重新读树 + 重新布局渲染
+  // renderGraph 顶部会 destroy 旧 graph，键盘监听不动
+  async rerenderGraph() {
+    const gc = this.container?.querySelector('.g6-container') as HTMLElement | null;
+    if (!gc) return;
+    try {
+      const treeData = await buildChapterTree(this.app, this.plugin.settings);
+      this.renderGraph(gc, treeData);
+    } catch (e) {
+      console.error("[星环图谱] 重建失败", e);
+    }
   }
 
   // 数据更新方法：当 Obsidian 中更新笔记时调用

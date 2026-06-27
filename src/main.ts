@@ -8,6 +8,8 @@ export interface StarRingSettings {
   errorFolder: string;
   chapterPrefix: string;
   rootName: string;
+  layout: 'fishbone' | 'sector'; // 鱼骨主干 / 星环扇区
+  detailZoom: number;            // 放大到该缩放才显示碎片/错题星团
 }
 
 const DEFAULT_SETTINGS: StarRingSettings = {
@@ -16,6 +18,8 @@ const DEFAULT_SETTINGS: StarRingSettings = {
   errorFolder: "StudyGuide/Errors",
   chapterPrefix: "2",
   rootName: "极限与无穷小",
+  layout: "fishbone",
+  detailZoom: 1.5,
 };
 
 export default class StarRingGraphPlugin extends Plugin {
@@ -52,6 +56,12 @@ export default class StarRingGraphPlugin extends Plugin {
       await leaf.setViewState({ type: STAR_RING_VIEW_TYPE, active: true });
     }
     workspace.revealLeaf(leaf);
+  }
+
+  // 设置变更后重建已打开的图谱（布局切换 / 阈值调整）
+  refreshView() {
+    this.app.workspace.getLeavesOfType(STAR_RING_VIEW_TYPE)
+      .forEach(leaf => (leaf.view as any).rerenderGraph?.());
   }
 
   async onunload() {
@@ -110,5 +120,31 @@ class StarRingSettingTab extends PluginSettingTab {
       .addText(t => t
         .setValue(this.plugin.settings.rootName)
         .onChange(async v => { this.plugin.settings.rootName = v; await this.plugin.saveSettings(); }));
+
+    new Setting(containerEl)
+      .setName("图谱布局")
+      .setDesc("鱼骨主干（章节横向铺开，MoC 斜下分刺）/ 星环扇区（同心圆环）")
+      .addDropdown(d => d
+        .addOption("fishbone", "鱼骨主干")
+        .addOption("sector", "星环扇区")
+        .setValue(this.plugin.settings.layout)
+        .onChange(async v => {
+          this.plugin.settings.layout = v as 'fishbone' | 'sector';
+          await this.plugin.saveSettings();
+          this.plugin.refreshView();
+        }));
+
+    new Setting(containerEl)
+      .setName("细节显现缩放")
+      .setDesc("放大超过该倍数时浮现碎片/错题星团（1.0–3.0）")
+      .addSlider(s => s
+        .setLimits(1.0, 3.0, 0.1)
+        .setValue(this.plugin.settings.detailZoom)
+        .setDynamicTooltip()
+        .onChange(async v => {
+          this.plugin.settings.detailZoom = v;
+          await this.plugin.saveSettings();
+          this.plugin.refreshView();
+        }));
   }
 }
