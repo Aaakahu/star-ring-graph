@@ -8,87 +8,100 @@ import type { RingNode, G6Data } from "./data";
 
 export const STAR_RING_VIEW_TYPE = "star-ring-view";
 
-// 扇区星环布局：按 chapterId 把外层节点归到章节扇区，新增节点只在自己扇区外扩，不挤别人
-// ponytail: 直接预算 x/y 写回 node，G6 v4.8 的 initPositions 会保留已有坐标 → 不配 layout 字段即可
-function starRingSectorLayout(nodes: any[], edges: any[], baseRadius = 140, minArc = 42) {
+// 扇区星环布局：按真实树形递归分扇区，标签长度参与角度加权，半径自适应补足弧长。
+// ponytail: 旧版按子树节点数加权 → 大子树吃掉角度，长标签叶子节点（"等价无穷小、无穷大代换"等）
+// 被挤到小角度 → 弧长不够放标签 → 视觉重合。改用 max(子树结构权重, 标签所需弧长) 取大者，
+// 且当节点分到的弧长 < 标签需要时放大该节点半径（保角度、增弧长），彻底防标签压盖。
+function starRingSectorLayout(nodes: any[], edges: any[], baseRadius = 220, minArc = 56) {
   if (nodes.length === 0) return;
+  const byId = new Map<string, any>(nodes.map(n => [n.id, n]));
+  const childrenOf = new Map<string, any[]>();
+  edges.forEach(e => {
+    if (!childrenOf.has(e.source)) childrenOf.set(e.source, []);
+    const t = byId.get(e.target);
+    if (t) childrenOf.get(e.source)!.push(t);
+  });
 
-  const maxLevel = Math.max(...nodes.map(n => n.level || 0));
+  const root = nodes.find(n => (n.level ?? 0) === 0) || nodes[0];
+  root.x = 0;
+  root.y = 0;
 
-  // 1. 分层计数 + 密度自适应半径（每层至少能容纳 count*minArc 弧长）
-  const levelCounts: number[] = new Array(maxLevel + 1).fill(0);
-  nodes.forEach(n => { levelCounts[n.level || 0]++; });
+  // 结构子节点：level≤2（root/chapter/moc）。Frag/Error(level≥3) 另作星团。
+  const structuralKids = (id: string) =>
+    (childrenOf.get(id) || []).filter(k => (k.level ?? 0) <= 2);
 
-  const radii: number[] = [];
-  let prev = 0;
-  for (let level = 0; level <= maxLevel; level++) {
-    const count = Math.max(levelCounts[level], 1);
-    const minRadius = (count * minArc) / (2 * Math.PI);
-    const base = level === 0 ? 0 : prev + baseRadius;
-    const r = level === 0 ? 0 : Math.max(base, minRadius);
-    radii.push(r);
-    if (level > 0) prev = r;
-  }
+  // 标签所需最小弧长（px）：字数 × 字宽 + 间隙
+  const CHAR_W = 10, GAP = 6;
+  const minLabelArc = (label: string) => (label || '').length * CHAR_W + GAP;
 
-  const byLevel = (lv: number) => nodes.filter(n => (n.level || 0) === lv);
+  // 子树角度权重 = max(自身标签所需弧长, 所有子节点权重之和)
+  // 取 max 而非相加：长标签叶子节点不会被大子树挤压，也不会独占角度
+  const wCache = new Map<string, number>();
+  const subtreeWeight = (id: string): number => {
+    if (wCache.has(id)) return wCache.get(id)!;
+    const node = byId.get(id);
+    const selfNeed = minLabelArc(node.label);
+    let kidsSum = 0;
+    structuralKids(id).forEach(k => { kidsSum += subtreeWeight(k.id); });
+    const w = Math.max(selfNeed, kidsSum);
+    wCache.set(id, w);
+    return w;
+  };
 
-  // 2. level 0 根节点 → 中心
-  byLevel(0).forEach(n => { n.x = 0; n.y = 0; });
+  // 放子树：父节点拥有角度 [a0,a1]，按子节点权重切分。
+  // 半径默认按深度 baseRadius*depth；若该节点弧长 < 标签需要，放大半径补足。
+  const placeSubtree = (node: any, a0: number, a1: number, depth: number) => {
+    const span = a1 - a0;
+    const baseR = depth === 0 ? 0 : baseRadius * depth;
+    let r = baseR;
+    const need = minLabelArc(node.label);
+    if (depth > 0 && r * span < need) {
+      r = need / span; // 放大半径补足弧长（父子连线会斜一点，可接受）
+    }
+    const mid = (a0 + a1) / 2;
+    node.x = Math.cos(mid) * r;
+    node.y = Math.sin(mid) * r;
 
-  // 3. level 1 章节 → 均匀分布，记录扇区角度区间
-  const chapterNodes = byLevel(1);
-  const chapterCount = Math.max(chapterNodes.length, 1);
-  const chapterAngle = (2 * Math.PI) / chapterCount;
-  const sectors = new Map<string, { start: number; end: number }>();
+    const kids = structuralKids(node.id);
+    if (kids.length === 0) return;
+    const totalW = kids.reduce((s, k) => s + subtreeWeight(k.id), 0);
+    let cursor = a0;
+    kids.forEach(k => {
+      const w = subtreeWeight(k.id) / totalW;
+      placeSubtree(k, cursor, cursor + span * w, depth + 1);
+      cursor += span * w;
+    });
+  };
 
-  chapterNodes.forEach((node, i) => {
-    const angle = i * chapterAngle; // 扇区中心
-    const r = radii[1] || baseRadius;
-    node.x = Math.cos(angle) * r;
-    node.y = Math.sin(angle) * r;
-    sectors.set(node.id, {
-      start: angle - chapterAngle / 2,
-      end: angle + chapterAngle / 2,
+  placeSubtree(root, 0, 2 * Math.PI, 0);
+
+  // Frag/Error 星团：每个 moc 收集其下所有 level≥3 后代（含跨层，如 Error 挂 Frag 下），围 moc 成环
+  const collectDetails = (mocId: string): any[] => {
+    const out: any[] = [];
+    const queue: string[] = [mocId];
+    while (queue.length) {
+      const cur = queue.shift()!;
+      (childrenOf.get(cur) || []).forEach(k => {
+        if ((k.level ?? 0) >= 3) out.push(k);
+        queue.push(k.id);
+      });
+    }
+    return out;
+  };
+  nodes.filter(n => (n.level ?? 0) === 2).forEach(moc => {
+    const kids = collectDetails(moc.id);
+    if (kids.length === 0) return;
+    const r = Math.max(35, (kids.length * 10) / (2 * Math.PI));
+    kids.forEach((k, i) => {
+      const a = (2 * Math.PI) * (kids.length === 1 ? 0 : i / kids.length);
+      k.x = (moc.x || 0) + Math.cos(a) * r;
+      k.y = (moc.y || 0) + Math.sin(a) * r;
     });
   });
 
-  // 4. level ≥2：按 chapterId 归扇区，在扇区内沿弧均匀分布；孤儿节点均匀铺整环
-  for (let level = 2; level <= maxLevel; level++) {
-    const levelNodes = byLevel(level);
-    const r = radii[level];
-    if (!r) continue;
-
-    const groups = new Map<string, any[]>();
-    const orphans: any[] = [];
-    levelNodes.forEach(n => {
-      const cid = n.chapterId;
-      if (cid && sectors.has(cid)) {
-        if (!groups.has(cid)) groups.set(cid, []);
-        groups.get(cid)!.push(n);
-      } else {
-        orphans.push(n);
-      }
-    });
-
-    // 有归属的：扇区内均匀铺
-    groups.forEach((groupNodes, cid) => {
-      const sec = sectors.get(cid)!;
-      const span = sec.end - sec.start;
-      groupNodes.forEach((n, i) => {
-        const t = groupNodes.length === 1 ? 0.5 : i / (groupNodes.length - 1);
-        const angle = sec.start + t * span;
-        n.x = Math.cos(angle) * r;
-        n.y = Math.sin(angle) * r;
-      });
-    });
-
-    // 孤儿：整环均匀铺
-    orphans.forEach((n, i) => {
-      const angle = (2 * Math.PI) * (orphans.length === 1 ? 0.25 : i / orphans.length);
-      n.x = Math.cos(angle) * r;
-      n.y = Math.sin(angle) * r;
-    });
-  }
+  // 兜底：仍未定位的孤儿节点铺到远处一行
+  const orphans = nodes.filter(n => n.x === undefined && n.y === undefined);
+  orphans.forEach((n, i) => { n.x = i * minArc; n.y = baseRadius * 4; });
 }
 
 // 鱼骨主干布局：level 0/1 横向铺主干，level 2(MoC) 斜下分刺，level≥3(碎片/错题) 围父节点成星团
@@ -272,6 +285,8 @@ export class StarRingView extends ItemView {
   _cleanupKeyListeners: (() => void) | null = null;
   g6Data: G6Data | null = null;           // 供 dblclick 折叠 BFS 用（修原 this.g6Data 未赋值 bug）
   private _detailsVisible = false;        // 语义缩放状态：碎片/错题当前是否显示
+  activeMocId: string | null = null;      // 当前活跃 MOC：放大过阈值时只显它的星云（按子树分批）
+  focusMode: { mocId: string } | null = null; // Alt+点击进入的聚焦模式
 
   constructor(leaf: WorkspaceLeaf, plugin: StarRingGraphPlugin) {
     super(leaf);
@@ -303,6 +318,7 @@ export class StarRingView extends ItemView {
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Control') this.ctrlHeld = true;
+      if (e.key === 'Escape' && this.focusMode) this.exitFocus(); // Esc 退出聚焦
     };
     const onKeyUp = (e: KeyboardEvent) => {
       if (e.key === 'Control') {
@@ -351,7 +367,7 @@ export class StarRingView extends ItemView {
     if (layout === 'fishbone') {
       fishboneLayout(g6Data.nodes, g6Data.edges);
     } else {
-      starRingSectorLayout(g6Data.nodes, g6Data.edges, 140, 42);
+      starRingSectorLayout(g6Data.nodes, g6Data.edges, 220, 56);
     }
     // 重建后重置语义缩放状态，让首次 applyLod 重新判定
     this._detailsVisible = false;
@@ -467,6 +483,18 @@ export class StarRingView extends ItemView {
       const model = node?.getModel();
       if (!model) return;
 
+      // Alt+左键点击 MOC：进入/退出聚焦模式（不再走居中+打开笔记）
+      const altKey = (evt.originalEvent as MouseEvent)?.altKey;
+      if (altKey && model.level === 2) {
+        if (this.focusMode?.mocId === model.id) this.exitFocus();
+        else this.focusOnMoc(model.id);
+        return;
+      }
+
+      // 普通点击：追溯当前活跃 MOC（放大过阈值时只显它的星云）
+      this.activeMocId = this.findMocAncestor(model.id);
+      this.applyLod();
+
       // 自动居中并放大到该节点
       this.graph.focusItem(node, true, {
         easing: 'easeCubic',
@@ -488,8 +516,9 @@ export class StarRingView extends ItemView {
       }
     });
     
-    // 空白处点击：重置视角
+    // 空白处点击：聚焦模式下退出，否则重置视角
     this.graph.on('canvas:click', () => {
+      if (this.focusMode) { this.exitFocus(); return; }
       this.graph.fitView(20, undefined, true, {
         easing: 'easeCubic',
         duration: 500,
@@ -545,25 +574,44 @@ export class StarRingView extends ItemView {
   //          ② 标签透明度每次滚动都同步（廉价的 attr 突变）
   applyLod() {
     if (!this.graph) return;
+    // 聚焦模式：显隐由 focusMode 接管，这里只同步标签透明度（全显）
+    if (this.focusMode) {
+      this.graph.getNodes().forEach((node: any) => {
+        node.getContainer().find((e: any) => e.get('name') === 'node-label')?.attr('opacity', 1);
+      });
+      return;
+    }
     const zoom = this.graph.getZoom();
     const detailZoom = this.plugin.settings.detailZoom ?? 1.5;
 
     // ① 节点/边可见性 —— 仅在跨阈值时执行（避免每次滚动 updateItem 全图）
+    // 按 MOC 子树分批：有 activeMocId 时只显它的星云，无则退回原行为（显全部）
     const shouldShow = zoom >= detailZoom;
     if (shouldShow !== this._detailsVisible) {
       this._detailsVisible = shouldShow;
+      const visibleIds = this.activeMocId ? this.collectDescendants(this.activeMocId) : null;
       this.graph.getNodes().forEach((node: any) => {
         const model = node.getModel();
         if ((model.level ?? 0) >= 3) {
-          this.graph.updateItem(node, { visible: shouldShow });
+          const show = shouldShow && (!visibleIds || visibleIds.has(model.id));
+          this.graph.updateItem(node, { visible: show });
         }
       });
-      // 边同步：任一端点 level≥3 则跟随碎片/错题显隐
+      // 边同步：任一端点 level≥3 则跟随碎片/错题显隐（且需在可见子树内）
       this.graph.getEdges().forEach((edge: any) => {
-        const sLv = edge.getSource()?.getModel()?.level ?? 0;
-        const tLv = edge.getTarget()?.getModel()?.level ?? 0;
+        const sModel = edge.getSource()?.getModel();
+        const tModel = edge.getTarget()?.getModel();
+        const sLv = sModel?.level ?? 0;
+        const tLv = tModel?.level ?? 0;
         if (sLv >= 3 || tLv >= 3) {
-          this.graph.updateItem(edge, { visible: shouldShow });
+          let show = shouldShow;
+          if (show && visibleIds) {
+            // 至少一端 level≥3 且该端在可见子树内
+            const sOk = sLv >= 3 ? visibleIds.has(sModel.id) : true;
+            const tOk = tLv >= 3 ? visibleIds.has(tModel.id) : true;
+            show = sOk && tOk;
+          }
+          this.graph.updateItem(edge, { visible: show });
         }
       });
     }
@@ -580,6 +628,97 @@ export class StarRingView extends ItemView {
       node.getContainer().find((e: any) => e.get('name') === 'node-label')
         ?.attr('opacity', opacity);
     });
+  }
+
+  // BFS 沿 edges 收集某节点的所有后代 id（含跨多级）。供 applyLod 分批 + focusOnMoc 共用
+  // ponytail: 不重建父子表，直接反查 edges；dblclick 折叠用同样的遍历
+  private collectDescendants(rootId: string): Set<string> {
+    const out = new Set<string>();
+    const queue: string[] = [];
+    this.g6Data!.edges.forEach(e => { if (e.source === rootId) queue.push(e.target); });
+    while (queue.length) {
+      const cur = queue.shift()!;
+      if (out.has(cur)) continue;
+      out.add(cur);
+      this.g6Data!.edges.forEach(e => { if (e.source === cur) queue.push(e.target); });
+    }
+    return out;
+  }
+
+  // 沿 edges 向上找最近的 level===2 祖先（含自己）。供 node:click 追溯活跃 MOC
+  private findMocAncestor(nodeId: string): string | null {
+    const childToParent = new Map<string, string>();
+    this.g6Data!.edges.forEach(e => childToParent.set(e.target, e.source));
+    const byId = new Map<string, any>(this.g6Data!.nodes.map(n => [n.id, n]));
+    let cur: string | undefined = nodeId;
+    let guard = 0;
+    while (cur && guard++ < 1000) {
+      const node = byId.get(cur);
+      if (node && (node.level ?? 0) === 2) return cur;
+      cur = childToParent.get(cur);
+    }
+    return null;
+  }
+
+  // Alt+点击 MOC 进入聚焦：该 MOC 居中、其星云环绕、其他 MOC 隐藏、根/章节压暗保留
+  private focusOnMoc(mocId: string) {
+    if (!this.graph || !this.g6Data) return;
+    const visibleIds = this.collectDescendants(mocId);
+    visibleIds.add(mocId);
+
+    this.graph.getNodes().forEach((node: any) => {
+      const model = node.getModel();
+      const lv = model.level ?? 0;
+      if (lv === 2 && model.id !== mocId) {
+        // 其他 MOC 隐藏
+        this.graph.updateItem(node, { visible: false });
+      } else if (lv <= 1) {
+        // 根/章节压暗保留（空间定位感）
+        this.graph.updateItem(node, { style: { opacity: 0.15 } });
+      } else if (visibleIds.has(model.id)) {
+        // 该 MOC 及其星云：显示并点亮
+        this.graph.updateItem(node, { visible: true, style: { opacity: 1 } });
+      }
+    });
+
+    // 边：两端都在可见集合内才显示
+    const isShown = (id: string) => {
+      const node = this.g6Data!.nodes.find(n => n.id === id);
+      const lv = node?.level ?? 0;
+      if (lv === 2) return id === mocId;
+      if (lv <= 1) return true; // 根/章节边保留（压暗）
+      return visibleIds.has(id);
+    };
+    this.graph.getEdges().forEach((edge: any) => {
+      const sId = edge.getSource()?.getModel()?.id;
+      const tId = edge.getTarget()?.getModel()?.id;
+      this.graph.updateItem(edge, { visible: sId && tId ? isShown(sId) && isShown(tId) : false });
+    });
+
+    this.focusMode = { mocId };
+    this.container?.classList.add('is-focused');
+
+    // 居中到该 MOC（其位置仍在原布局处，平滑聚焦过去）
+    this.graph.focusItem(mocId, true, { easing: 'easeCubic', duration: 500 });
+    this.applyLod(); // 聚焦态下走短路分支，点亮所有标签
+  }
+
+  // 退出聚焦：还原全部节点显隐/透明，重建 LOD，重置视角
+  private exitFocus() {
+    if (!this.graph) return;
+    this.focusMode = null;
+    this.container?.classList.remove('is-focused');
+    // 先把所有节点还原到"全可见"，再交 applyLod 按 LOD 重新裁定
+    this.graph.getNodes().forEach((node: any) => {
+      this.graph.updateItem(node, { visible: true, style: { opacity: 1 } });
+    });
+    this.graph.getEdges().forEach((edge: any) => {
+      this.graph.updateItem(edge, { visible: true });
+    });
+    // _detailsVisible 状态可能已被 focus 覆盖，强制重算：先置反再调 applyLod
+    this._detailsVisible = !this._detailsVisible;
+    this.applyLod();
+    this.graph.fitView(20, undefined, true, { easing: 'easeCubic', duration: 500 });
   }
 
   // 设置变更（布局切换 / 阈值调整）后重建图谱：重新读树 + 重新布局渲染
