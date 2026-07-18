@@ -1,6 +1,9 @@
 // 星环图谱插件入口
-import { Plugin, PluginSettingTab, Setting } from "obsidian";
+import { Plugin, PluginSettingTab, Setting, Notice } from "obsidian";
 import { StarRingView, STAR_RING_VIEW_TYPE } from "./view";
+import * as fs from "fs";
+import * as path from "path";
+import { spawn } from "child_process";
 
 // 一个数据源 = 一个 MOC 文件夹 + 对应的 Flash 文件夹 + Error 文件夹
 // 未来扩线代时，加一组 sources 即可，互不干扰
@@ -15,6 +18,13 @@ export interface StarRingSettings {
   sources: FolderSource[];
   layout: 'fishbone' | 'sector'; // 鱼骨主干 / 星环扇区
   detailZoom: number;            // 预留（当前旭日图不消费，但 slider 保留）
+  // ===== LightRAG 配置（方案 B：插件面板填 → 写 .env → 重启 server）=====
+  lightragUrl: string;           // LightRAG server 地址（查询用）
+  llmApiKey: string;             // GLM API key（密码框，写进 .env）
+  llmBaseUrl: string;            // LLM base URL（默认智谱）
+  llmModel: string;              // LLM 模型名
+  embeddingModel: string;        // Embedding 模型名
+  lightragDir: string;           // lightrag/ 目录的绝对路径（含 venv + restart.sh）
 }
 
 const DEFAULT_SETTINGS: StarRingSettings = {
@@ -28,6 +38,12 @@ const DEFAULT_SETTINGS: StarRingSettings = {
   ],
   layout: "fishbone",
   detailZoom: 1.5,
+  lightragUrl: "http://127.0.0.1:9620",
+  llmApiKey: "",
+  llmBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
+  llmModel: "glm-4.5",
+  embeddingModel: "embedding-3",
+  lightragDir: "",  // loadSettings 时若为空，按插件目录补全
 };
 
 export default class StarRingGraphPlugin extends Plugin {
@@ -76,11 +92,105 @@ export default class StarRingGraphPlugin extends Plugin {
       delete loaded.mindTreeFolder; delete loaded.flashFolder; delete loaded.errorFolder;
       delete loaded.chapterPrefix; delete loaded.rootName;
     }
+    // lightragDir 默认值在常量里算不了（要用 vault 路径），这里补全
+    if (!loaded.lightragDir) {
+      const vaultRoot = (this.app.vault.adapter as any).getBasePath?.() || "";
+      loaded.lightragDir = path.join(vaultRoot, ".obsidian", "plugins", "star-ring-graph", "lightrag");
+    }
     this.settings = loaded;
   }
 
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+
+  /**
+   * 方案 B 核心：把面板里的 GLM 配置写入 lightrag/.env，然后调 restart.sh 重启 server。
+   * 调用时机：用户点设置面板的"应用并重启 LightRAG"按钮。
+   */
+  async applyLightragConfig(): Promise<{ ok: boolean; msg: string }> {
+    const dir = this.settings.lightragDir;
+    const envPath = path.join(dir, ".env");
+    const restartScript = path.join(dir, "restart.sh");
+
+    // 校验目录存在
+    if (!fs.existsSync(dir)) {
+      return { ok: false, msg: `LightRAG 目录不存在：${dir}。请先按 lightrag/README.md 部署。` };
+    }
+    // 校验关键字段非空
+    if (!this.settings.llmApiKey) {
+      return { ok: false, msg: "GLM API Key 不能为空" };
+    }
+
+    // 写 .env（变量名对齐 lightrag-hku 1.5.4 config.py：LLM_BINDING_HOST / EMBEDDING_BINDING_HOST）
+    const envContent = [
+      `# 由星环图谱插件自动生成 — ${new Date().toISOString()}`,
+      `# 勿手动编辑（会被插件「应用并重启」覆盖）`,
+      ``,
+      `# LLM 配置`,
+      `LLM_BINDING=openai`,
+      `LLM_API_KEY=${this.settings.llmApiKey}`,
+      `LLM_MODEL=${this.settings.llmModel}`,
+      `LLM_BINDING_HOST=${this.settings.llmBaseUrl}`,
+      ``,
+      `# Embedding 配置`,
+      `EMBEDDING_BINDING=openai`,
+      `EMBEDDING_API_KEY=${this.settings.llmApiKey}`,
+      `EMBEDDING_MODEL=${this.settings.embeddingModel}`,
+      `EMBEDDING_BINDING_HOST=${this.settings.llmBaseUrl}`,
+      ``,
+      `# 存储配置`,
+      `LIGHTRAG_DATA_DIR=${path.join(dir, "rag_storage").replace(/\\/g, "/")}`,
+      ``,
+      `# Server`,
+      `HOST=127.0.0.1`,
+      `PORT=9620`,
+      ``,
+      `# 日志`,
+      `LIGHTRAG_LOG_LEVEL=INFO`,
+      `MAX_ASYNC=4`,
+      ``,
+    ].join("\n");
+
+    try {
+      fs.writeFileSync(envPath, envContent, "utf-8");
+    } catch (e: any) {
+      return { ok: false, msg: `写 .env 失败：${e.message}。检查目录权限：${dir}` };
+    }
+
+    // 调 restart.sh 重启 server
+    // ponytail: spawn bash 跑脚本，30 秒内看 exit code。失败提示用户手动重启。
+    return new Promise((resolve) => {
+      const child = spawn("bash", [restartScript], {
+        cwd: dir,
+        shell: false,
+        windowsHide: true,
+      });
+      let stdout = "", stderr = "";
+      child.stdout.on("data", d => stdout += d);
+      child.stderr.on("data", d => stderr += d);
+
+      const timer = setTimeout(() => {
+        child.kill();
+        resolve({ ok: false, msg: `restart.sh 超时（30秒）。手动检查：cd "${dir}" && bash restart.sh` });
+      }, 30000);
+
+      child.on("close", code => {
+        clearTimeout(timer);
+        if (code === 0) {
+          resolve({ ok: true, msg: "配置已写入，LightRAG server 已重启" });
+        } else {
+          resolve({
+            ok: false,
+            msg: `restart.sh 退出码 ${code}。${stderr || stdout}\n手动重试：cd "${dir}" && bash restart.sh`,
+          });
+        }
+      });
+      child.on("error", err => {
+        clearTimeout(timer);
+        resolve({ ok: false, msg: `无法启动 bash：${err.message}。手动执行：cd "${dir}" && bash restart.sh` });
+      });
+    });
   }
 
   async activateView() {
@@ -213,6 +323,75 @@ class StarRingSettingTab extends PluginSettingTab {
         .onChange(async v => {
           this.plugin.settings.detailZoom = v;
           await this.plugin.saveSettings();
+        }));
+
+    // ============ LightRAG 配置（方案 B）============
+    containerEl.createEl("h3", { text: "LightRAG 知识库查询" });
+    containerEl.createEl("p", {
+      text: "填入 GLM API 配置后点「应用并重启」，插件会写入 lightrag/.env 并重启 server。首次部署见 lightrag/README.md。",
+      cls: "setting-item-description"
+    });
+
+    new Setting(containerEl)
+      .setName("LightRAG 服务地址")
+      .setDesc("本地 LightRAG server 的 URL（查询用，一般不用改）")
+      .addText(t => t
+        .setValue(this.plugin.settings.lightragUrl)
+        .onChange(async v => { this.plugin.settings.lightragUrl = v; await this.plugin.saveSettings(); }));
+
+    new Setting(containerEl)
+      .setName("GLM API Key")
+      .setDesc("智谱 API key（去 open.bigmodel.cn 申请）")
+      .addText(t => {
+        t.inputEl.type = "password";
+        t.setValue(this.plugin.settings.llmApiKey)
+          .onChange(async v => { this.plugin.settings.llmApiKey = v; await this.plugin.saveSettings(); });
+      });
+
+    new Setting(containerEl)
+      .setName("LLM Base URL")
+      .setDesc("智谱 OpenAI 兼容端点")
+      .addText(t => t
+        .setValue(this.plugin.settings.llmBaseUrl)
+        .onChange(async v => { this.plugin.settings.llmBaseUrl = v; await this.plugin.saveSettings(); }));
+
+    new Setting(containerEl)
+      .setName("LLM 模型名")
+      .setDesc("如 glm-4.5 / glm-4.5-air / glm-4-plus")
+      .addText(t => t
+        .setValue(this.plugin.settings.llmModel)
+        .onChange(async v => { this.plugin.settings.llmModel = v; await this.plugin.saveSettings(); }));
+
+    new Setting(containerEl)
+      .setName("Embedding 模型名")
+      .setDesc("如 embedding-3 / embedding-2")
+      .addText(t => t
+        .setValue(this.plugin.settings.embeddingModel)
+        .onChange(async v => { this.plugin.settings.embeddingModel = v; await this.plugin.saveSettings(); }));
+
+    new Setting(containerEl)
+      .setName("LightRAG 目录")
+      .setDesc("lightrag/ 文件夹的绝对路径（含 venv + restart.sh）")
+      .addText(t => t
+        .setValue(this.plugin.settings.lightragDir)
+        .onChange(async v => { this.plugin.settings.lightragDir = v; await this.plugin.saveSettings(); }));
+
+    // "应用并重启"按钮 — 方案 B 核心
+    new Setting(containerEl)
+      .setName("应用并重启 LightRAG")
+      .setDesc("把上面的 GLM 配置写入 .env 并重启 server（约 5-15 秒）")
+      .addButton(b => b
+        .setButtonText("应用并重启")
+        .setCta()
+        .onClick(async () => {
+          b.setButtonText("重启中…");
+          b.setDisabled(true);
+          new Notice("正在写入 .env 并重启 LightRAG…");
+          const result = await this.plugin.applyLightragConfig();
+          b.setButtonText("应用并重启");
+          b.setDisabled(false);
+          new Notice(result.msg, result.ok ? 4000 : 8000);
+          if (result.ok) this.display();
         }));
   }
 }
