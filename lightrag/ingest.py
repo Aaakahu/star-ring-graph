@@ -220,22 +220,30 @@ def insert_batch(texts: list, file_sources: list):
 
 
 def wait_for_track(track_id: str, timeout: int = 300):
-    """轮询 track-status 直到完成或超时。"""
+    """轮询 track_status 直到完成或超时。
+    注意 lightrag-hku 1.5.4 的端点是 /documents/track_status/{track_id}
+    （下划线 + track_id 在路径里，不是 query 参数）。
+    """
     if not track_id:
         return
     start = time.time()
     while time.time() - start < timeout:
         try:
-            r = requests.get(f"{LIGHTAG_URL}/documents/track-status",
-                           params={"track_id": track_id}, timeout=10)
+            # 正确端点：track_status（下划线）+ track_id 在路径里
+            r = requests.get(f"{LIGHTAG_URL}/documents/track_status/{track_id}", timeout=10)
             if r.status_code == 200:
                 data = r.json()
-                status = data.get("status", "")
-                if status in ("completed", "success", "done", "failed", "error"):
-                    return status
-                progressed = data.get("progressed", 0)
-                total = data.get("total", 0)
-                print(f"    进度: {progressed}/{total} ({status})")
+                # track_status 返回 {documents: [{status: "..."}]}，看每个 doc 的状态
+                docs = data.get("documents", [])
+                if docs:
+                    statuses = [d.get("status", "") for d in docs]
+                    done = sum(1 for s in statuses if s in ("completed", "failed", "success"))
+                    total = len(statuses)
+                    print(f"    进度: {done}/{total} 完成 ({', '.join(set(statuses))})")
+                    if done == total:
+                        # 全部处理完（无论成功失败）
+                        failed = sum(1 for s in statuses if s == "failed")
+                        return "completed" if failed == 0 else f"completed({failed} failed)"
         except Exception:
             pass
         time.sleep(3)

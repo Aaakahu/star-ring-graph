@@ -10,9 +10,12 @@
   "layout": "sector",
   "detailZoom": 1.5,
   "lightragUrl": "http://127.0.0.1:9620",
+  "llmProvider": "glm",
   "llmApiKey": "3c19920de49e4128bd4bc1d74eb5ee03.NF2vjMOVXyO1BBoH",
-  "llmBaseUrl": "https://open.bigmodel.cn/api/coding/paas/v4",
-  "llmModel": "glm-4.5",
+  "llmBaseUrl": "https://open.bigmodel.cn/api/paas/v4",
+  "llmModel": "GLM-4.5",
+  "embeddingApiKey": "",
+  "embeddingBaseUrl": "",
   "embeddingModel": "embedding-3",
   "lightragDir": "C:\\Users\\34547\\Desktop\\新版sg构建测试\\.obsidian\\plugins\\star-ring-graph\\lightrag"
 }

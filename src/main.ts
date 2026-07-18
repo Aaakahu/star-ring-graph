@@ -165,23 +165,29 @@ export default class StarRingGraphPlugin extends Plugin {
       return { ok: false, msg: "Embedding API Key 不能为空（LLM key 为空时 embedding 必须单独填）" };
     }
 
-    // 写 .env（变量名对齐 lightrag-hku 1.5.4 config.py：LLM_BINDING_HOST / EMBEDDING_BINDING_HOST）
-    // embedding 字段留空时回退到 LLM 的（DeepSeek/Claude 场景 embedding 需另配）
-    // embKey 已在上方校验时声明；embUrl 同样回退到 LLM 的
+    // 写 .env
+    // 变量名覆盖 lightrag-hku 1.5.4 的所有读取路径（源码实证）：
+    //   - LLM 调用 openai.py:192 硬读 os.environ["OPENAI_API_KEY"]
+    //   - Embedding openai.py:1075 读 os.getenv("LLM_BINDING_API_KEY")
+    //   - config.py 读 LLM_BINDING_HOST / LLM_MODEL / EMBEDDING_BINDING_HOST / EMBEDDING_MODEL
+    // 所以为 LLM 同时写 OPENAI_API_KEY + LLM_API_KEY + LLM_BINDING_API_KEY，三路都不落空
     const embUrl = this.settings.embeddingBaseUrl || this.settings.llmBaseUrl;
     const envContent = [
       `# 由星环图谱插件自动生成 — ${new Date().toISOString()}`,
       `# 勿手动编辑（会被插件「应用并重启」覆盖）`,
       ``,
-      `# LLM 配置`,
+      `# LLM 配置（三个 KEY 变量名同值，覆盖 lightrag 所有读取路径）`,
       `LLM_BINDING=openai`,
+      `OPENAI_API_KEY=${this.settings.llmApiKey}`,
       `LLM_API_KEY=${this.settings.llmApiKey}`,
+      `LLM_BINDING_API_KEY=${this.settings.llmApiKey}`,
       `LLM_MODEL=${this.settings.llmModel}`,
       `LLM_BINDING_HOST=${this.settings.llmBaseUrl}`,
       ``,
-      `# Embedding 配置（留空字段已回退到 LLM 的值）`,
+      `# Embedding 配置（embKey 留空时已回退到 LLM key）`,
       `EMBEDDING_BINDING=openai`,
       `EMBEDDING_API_KEY=${embKey}`,
+      `EMBEDDING_BINDING_API_KEY=${embKey}`,
       `EMBEDDING_MODEL=${this.settings.embeddingModel}`,
       `EMBEDDING_BINDING_HOST=${embUrl}`,
       ``,
