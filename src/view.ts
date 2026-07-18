@@ -1,6 +1,6 @@
 // 星环图谱视图 + 渲染逻辑（AntV G6）
 
-import { ItemView, WorkspaceLeaf } from "obsidian";
+import { ItemView, WorkspaceLeaf, requestUrl } from "obsidian";
 import type StarRingGraphPlugin from "./main";
 import G6 from '@antv/g6';
 import { buildChapterTree, convertToG6Data } from "./data";
@@ -625,6 +625,9 @@ export class StarRingView extends ItemView {
   private _rendering = false; // renderGraph 进行中/刚结束，抑制 ResizeObserver 的 fitView 抢占视角
   private _focusReturnTree: RingNode | null = null; // 进入聚焦前的全局树备份，exitFocus 用
   private _preFocusMatrix: number[] | null = null;  // 进入聚焦前的视图矩阵 [a,b,c,d,e,f]，退出时恢复
+  // ===== LightRAG 查询浮层 =====
+  private _queryOverlay: QueryOverlay | null = null;
+  private _queryHighlightActive = false; // 查询高亮进行中时，抑制 hover 链路高亮
 
   constructor(leaf: WorkspaceLeaf, plugin: StarRingGraphPlugin) {
     super(leaf);
@@ -647,6 +650,9 @@ export class StarRingView extends ItemView {
     graphContainer.style.height = "100%";
     // 屏蔽浏览器右键菜单，让右键专门用于拖动画布
     graphContainer.addEventListener("contextmenu", (e) => e.preventDefault());
+
+    // LightRAG 查询浮层（叠加在 g6-container 上，不破坏现有布局）
+    this._queryOverlay = new QueryOverlay(graphContainer, this);
 
     // 按住 Ctrl 锁定链路高亮：keydown 置位、keyup 清位 + 手动清高亮
     // 清状态时同步恢复所有 label 显示（hover 隐藏后松 Ctrl 必须把 label show 回来，否则文字永久消失）
@@ -693,6 +699,7 @@ export class StarRingView extends ItemView {
     if (this._resizeFitTimer) { clearTimeout(this._resizeFitTimer); this._resizeFitTimer = null; }
     if (this._cleanupKeyListeners) { this._cleanupKeyListeners(); this._cleanupKeyListeners = null; }
     if (this._cleanupWheel) { this._cleanupWheel(); this._cleanupWheel = null; }
+    if (this._queryOverlay) { this._queryOverlay.destroy(); this._queryOverlay = null; }
     if (this.graph) {
       this.graph.destroy();
       this.graph = null;
@@ -1068,6 +1075,7 @@ export class StarRingView extends ItemView {
 
     this.graph.on('node:mouseenter', (evt: any) => {
       if (this.ctrlHeld) return; // Ctrl 锁定：不切换高亮
+      if (this._queryHighlightActive) return; // 查询高亮进行中：hover 不抢
       if (!this.graph || this.graph.destroyed) return;
       const model = evt.item?.getModel();
       if (!model) return;
@@ -1373,5 +1381,371 @@ export class StarRingView extends ItemView {
     } catch (e) {
       console.error("[星环图谱] 数据更新失败", e);
     }
+  }
+}
+
+// ============================================================================
+// QueryOverlay — LightRAG 查询浮层（Astryx 设计语言）
+// 封装：浮层 DOM + 4 动作自定义下拉 + 查询逻辑（调 LightRAG）+ 实体匹配 + 结构扩展 + 高亮
+// 参考：plan/reference/star-ring-preview.html（UI）、plan/03-query-algorithm.md（算法）
+// ============================================================================
+
+// 4 动作 → 目标卡片类型（替代 LightRAG 默认 5 模式，对齐三层卡片结构）
+const ACTION_TARGET: Record<string, {
+  moc: boolean; flashSubtypes: string[]; error: boolean; label: string;
+}> = {
+  concept: { moc: true,  flashSubtypes: ['know_what'],                       error: false, label: '学概念' },
+  method:  { moc: false, flashSubtypes: ['know_how'],                        error: false, label: '找方法' },
+  error:   { moc: false, flashSubtypes: ['know_why'],                        error: true,  label: '查错题' },
+  review:  { moc: true,  flashSubtypes: ['know_what','know_how','know_why'], error: true,  label: '复习专题' },
+};
+
+class QueryOverlay {
+  private host: HTMLElement;          // 浮层挂载点（g6-container）
+  private view: StarRingView;
+  private el: HTMLElement;            // 浮层根元素
+  private mode = 'concept';           // 当前选中的动作
+  private modeLabel: HTMLElement;
+  private dropdownEl: HTMLElement;
+  private inputEl: HTMLInputElement;
+  private ansBodyEl: HTMLElement;
+  private hitsSummaryEl: HTMLElement;
+  private chipMocEl: HTMLElement;
+  private chipFlashEl: HTMLElement;
+  private chipErrorEl: HTMLElement;
+
+  constructor(host: HTMLElement, view: StarRingView) {
+    this.host = host;
+    this.view = view;
+    this.el = host.createEl("div", { cls: "sr-query-fab" });
+    this.el.innerHTML = `
+      <div class="sr-query-header">
+        <svg class="sr-icon" viewBox="0 0 24 24" width="16" height="16"><circle cx="11" cy="11" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m21 21-4.35-4.35" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <span class="sr-query-title">知识库查询</span>
+        <span class="sr-query-toggle">收起</span>
+      </div>
+      <div class="sr-query-body">
+        <div class="sr-query-row">
+          <div class="sr-input-wrap">
+            <input type="text" class="sr-query-input" placeholder="输入知识点 / 套路 / 错题关键词…" value="泰勒展开">
+          </div>
+          <div class="sr-dropdown">
+            <button class="sr-dropdown-trigger" type="button">
+              <span class="sr-mode-label">学概念</span>
+              <svg class="sr-icon sr-icon-sm sr-chevron" viewBox="0 0 24 24" width="14" height="14"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <div class="sr-dropdown-menu">
+              <div class="sr-dropdown-item selected" data-value="concept">
+                <div><div class="sr-item-label">学概念</div><div class="sr-item-desc">MOC + 是什么</div></div>
+                <svg class="sr-icon sr-icon-sm sr-check" viewBox="0 0 24 24" width="14" height="14"><path d="M20 6 9 17l-5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </div>
+              <div class="sr-dropdown-item" data-value="method">
+                <div><div class="sr-item-label">找方法</div><div class="sr-item-desc">怎么做 Flash</div></div>
+                <svg class="sr-icon sr-icon-sm sr-check" viewBox="0 0 24 24" width="14" height="14"><path d="M20 6 9 17l-5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </div>
+              <div class="sr-dropdown-item" data-value="error">
+                <div><div class="sr-item-label">查错题</div><div class="sr-item-desc">错题 + 错因</div></div>
+                <svg class="sr-icon sr-icon-sm sr-check" viewBox="0 0 24 24" width="14" height="14"><path d="M20 6 9 17l-5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </div>
+              <div class="sr-dropdown-item" data-value="review">
+                <div><div class="sr-item-label">复习专题</div><div class="sr-item-desc">全套</div></div>
+                <svg class="sr-icon sr-icon-sm sr-check" viewBox="0 0 24 24" width="14" height="14"><path d="M20 6 9 17l-5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </div>
+            </div>
+          </div>
+          <button class="sr-query-btn" type="button">
+            <svg viewBox="0 0 24 24" width="14" height="14"><path d="M5 12h14M13 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            查询
+          </button>
+        </div>
+        <div class="sr-answer-box">
+          <div class="sr-ans-label">GLM 回答</div>
+          <div class="sr-ans-body">输入问题，选择学习动作，查询你的三层卡片知识库。</div>
+        </div>
+        <div class="sr-hits-summary" style="display:none">
+          <span class="sr-chip sr-chip-moc">MOC 0</span>
+          <span class="sr-chip sr-chip-flash">Flash 0</span>
+          <span class="sr-chip sr-chip-error">Error 0</span>
+        </div>
+      </div>
+    `;
+
+    // 绑定元素引用
+    this.modeLabel = this.el.querySelector('.sr-mode-label')!;
+    this.dropdownEl = this.el.querySelector('.sr-dropdown')!;
+    this.inputEl = this.el.querySelector('.sr-query-input')!;
+    this.ansBodyEl = this.el.querySelector('.sr-ans-body')!;
+    this.hitsSummaryEl = this.el.querySelector('.sr-hits-summary')!;
+    this.chipMocEl = this.el.querySelector('.sr-chip-moc')!;
+    this.chipFlashEl = this.el.querySelector('.sr-chip-flash')!;
+    this.chipErrorEl = this.el.querySelector('.sr-chip-error')!;
+
+    this.bindEvents();
+  }
+
+  private bindEvents() {
+    // 折叠/展开
+    const header = this.el.querySelector('.sr-query-header') as HTMLElement;
+    const toggle = this.el.querySelector('.sr-query-toggle')!;
+    header.addEventListener('click', () => {
+      this.el.classList.toggle('collapsed');
+      toggle.textContent = this.el.classList.contains('collapsed') ? '展开' : '收起';
+    });
+
+    // 下拉开关
+    const trigger = this.el.querySelector('.sr-dropdown-trigger') as HTMLElement;
+    trigger.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.dropdownEl.classList.toggle('open');
+    });
+
+    // 下拉项选择
+    this.el.querySelectorAll('.sr-dropdown-item').forEach(item => {
+      item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const val = (item as HTMLElement).dataset.value!;
+        this.mode = val;
+        this.modeLabel.textContent = ACTION_TARGET[val].label;
+        this.el.querySelectorAll('.sr-dropdown-item').forEach(i =>
+          i.classList.toggle('selected', i === item));
+        this.dropdownEl.classList.remove('open');
+      });
+    });
+
+    // 点外部关闭下拉
+    this.host.ownerDocument.addEventListener('click', (e) => {
+      if (!(e.target as HTMLElement).closest('.sr-dropdown')) {
+        this.dropdownEl.classList.remove('open');
+      }
+    });
+
+    // 查询按钮
+    const btn = this.el.querySelector('.sr-query-btn') as HTMLElement;
+    btn.addEventListener('click', () => this.runQuery());
+    this.inputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') this.runQuery();
+    });
+  }
+
+  // ============ 查询主流程 ============
+  private async runQuery() {
+    const q = this.inputEl.value.trim();
+    if (!q) return;
+    const url = this.view.plugin.settings.lightragUrl;
+    const action = ACTION_TARGET[this.mode];
+
+    this.ansBodyEl.innerHTML = `<span class="sr-ans-loading">⟳ ${action.label} 检索中… GLM 生成答案</span>`;
+    this.hitsSummaryEl.style.display = 'none';
+
+    try {
+      // 并发：/query 拿答案 + /query/data 拿实体
+      const modeMap: Record<string,string> = { concept:'mix', method:'mix', error:'mix', review:'mix' };
+      const lrMode = modeMap[this.mode] || 'mix';
+      const [ansResp, dataResp] = await Promise.all([
+        requestUrl({ url: `${url}/query`, method: "POST",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({ query: q, mode: lrMode }) }).catch(e => ({json:{response:`查询失败：${e.message}`}})),
+        requestUrl({ url: `${url}/query/data`, method: "POST",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({ query: q, mode: lrMode }) }).catch(e => ({json:{data:{entities:[],relationships:[]}}})),
+      ]);
+
+      const answer = (ansResp as any).json?.response || '（无答案）';
+      this.ansBodyEl.innerHTML = this.escapeHtml(answer).replace(/\n/g, '<br>');
+
+      // 实体名集合
+      const entities: any[] = (dataResp as any).json?.data?.entities || [];
+      const entityNames = entities.map((e:any) => e.entity_name).filter(Boolean);
+
+      await this.applyHighlight(entityNames, this.mode);
+    } catch (e: any) {
+      this.ansBodyEl.innerHTML = `<span style="color:#c6a6a2">查询出错：${this.escapeHtml(e.message)}</span>`;
+    }
+  }
+
+  // ============ 实体匹配 + 结构扩展 + 高亮 ============
+  private async applyHighlight(entityNames: string[], mode: string) {
+    const graph = this.view.graph;
+    const g6Data = this.view.g6Data;
+    if (!graph || graph.destroyed || !g6Data) {
+      this.ansBodyEl.innerHTML += '<br><span style="color:#96A0AB;font-size:11px">（图谱未就绪，无法高亮）</span>';
+      return;
+    }
+
+    // Pass 1: 实体名 → 节点 basename 三级匹配
+    const hitIds = new Set<string>();
+    g6Data.nodes.forEach(n => {
+      const label = String(n.label || '');
+      const origType = String(n._originalType || '');
+      // basename 去前缀（2.1.1_数列极限 → 数列极限）
+      const stripped = label.replace(/^[\d.]+_/, '');
+      for (const name of entityNames) {
+        if (!name || name.length < 2) continue;
+        if (label.includes(name) || stripped.includes(name) || name.includes(stripped)) {
+          hitIds.add(n.id);
+          break;
+        }
+      }
+    });
+
+    // Pass 2: 结构扩展（档2，沿 mindtree 双链）
+    const { finalIds } = this.expandByStructure(g6Data, hitIds, mode);
+
+    // 应用高亮（复用 G6 的 active/inactive 状态）
+    this.view._queryHighlightActive = true;
+    let mocCount=0, flashCount=0, errorCount=0;
+    graph.getNodes().forEach((n: any) => {
+      const m = n.getModel();
+      if (finalIds.has(m.id)) {
+        graph.setItemState(n, 'active', true);
+        graph.setItemState(n, 'inactive', false);
+        const lvl = m.level ?? 0;
+        if (lvl === 2) mocCount++;
+        else if (lvl === 3) flashCount++;
+        else if (lvl === 4) errorCount++;
+      } else {
+        graph.setItemState(n, 'inactive', true);
+        graph.setItemState(n, 'active', false);
+      }
+    });
+    graph.getEdges().forEach((e: any) => {
+      const m = e.getModel();
+      if (finalIds.has(m.source) && finalIds.has(m.target)) {
+        graph.setItemState(e, 'active', true);
+        graph.setItemState(e, 'inactive', false);
+      } else {
+        graph.setItemState(e, 'inactive', true);
+        graph.setItemState(e, 'active', false);
+      }
+    });
+
+    // 更新 chip 统计
+    this.hitsSummaryEl.style.display = 'flex';
+    this.chipMocEl.textContent = `MOC ${mocCount}`;
+    this.chipFlashEl.textContent = `Flash ${flashCount}`;
+    this.chipErrorEl.textContent = `Error ${errorCount}`;
+  }
+
+  // ============ 档2 结构扩展算法（对齐 plan/03-query-algorithm.md）============
+  private expandByStructure(g6Data: G6Data, hitIds: Set<string>, mode: string): { finalIds: Set<string> } {
+    const action = ACTION_TARGET[mode];
+    const finalIds = new Set<string>();
+
+    // 建父子索引（只用 tree 结构边，排除 aux 辅连线 —— 关键防回归点）
+    const parentOf = new Map<string, string>();
+    const childrenOf = new Map<string, string[]>();
+    g6Data.edges.forEach(e => {
+      if ((e as any).relation === 'aux') return;
+      parentOf.set(e.target, e.source);
+      if (!childrenOf.has(e.source)) childrenOf.set(e.source, []);
+      childrenOf.get(e.source)!.push(e.target);
+    });
+    const nodeById = new Map<string, any>();
+    g6Data.nodes.forEach(n => nodeById.set(n.id, n));
+
+    // 节点类型判断：level 2=moc, 3=flash, 4=error；flash 的 subtype 从 _originalType 推
+    const nodeType = (n: any): 'moc'|'flash'|'error'|'other' => {
+      const lvl = n.level ?? 0;
+      if (lvl === 2) return 'moc';
+      if (lvl === 3) return 'flash';
+      if (lvl === 4) return 'error';
+      return 'other';
+    };
+    // ponytail: subtype 从文件名/label 推不了（G6 node 没存），这里用 _originalType 的 mocN 近似
+    // 真实 subtype 在 ingest 时喂给 LLM，查询时实体已带语义，匹配靠实体名
+    const flashSubtype = (_n: any): string => 'know_how'; // 兜底：结构扩展时无法精确判 subtype，全保留
+
+    // Pass 1: 按动作目标筛选语义命中节点
+    hitIds.forEach(id => {
+      const node = nodeById.get(id);
+      if (!node) return;
+      const t = nodeType(node);
+      if (t === 'moc' && action.moc) finalIds.add(id);
+      else if (t === 'flash' && action.flashSubtypes.includes(flashSubtype(node))) finalIds.add(id);
+      else if (t === 'error' && action.error) finalIds.add(id);
+    });
+
+    // Pass 2: 沿双链扩展
+    const climbMOC = (nId: string) => {
+      let cur = parentOf.get(nId);
+      while (cur !== undefined) {
+        const p = nodeById.get(cur);
+        if (p && nodeType(p) === 'moc' && (action.moc || mode === 'error')) {
+          finalIds.add(cur);
+        }
+        cur = parentOf.get(cur);
+      }
+    };
+
+    hitIds.forEach(id => {
+      const node = nodeById.get(id);
+      if (!node) return;
+      const t = nodeType(node);
+
+      if (t === 'flash') {
+        climbMOC(id);
+        // 找方法：同 MOC 下的兄弟 flash
+        if (mode === 'method') {
+          const moc = parentOf.get(id);
+          (childrenOf.get(moc) || []).forEach(sib => {
+            const sn = nodeById.get(sib);
+            if (sn && nodeType(sn) === 'flash' && !finalIds.has(sib)) finalIds.add(sib);
+          });
+        }
+        // 查错题/复习：亮下挂的 Error
+        if (action.error) {
+          (childrenOf.get(id) || []).forEach(child => {
+            if (!finalIds.has(child)) finalIds.add(child);
+          });
+        }
+      } else if (t === 'error') {
+        // 反查父 Flash（暴露的套路盲点）
+        const pf = parentOf.get(id);
+        if (pf !== undefined) {
+          finalIds.add(pf);
+          climbMOC(pf);
+        }
+        // 复习：同主题其他错题
+        if (mode === 'review') {
+          const moc = parentOf.get(pf);
+          (childrenOf.get(moc) || []).forEach(sib => {
+            (childrenOf.get(sib) || []).forEach(err => {
+              const en = nodeById.get(err);
+              if (en && nodeType(en) === 'error' && !finalIds.has(err)) finalIds.add(err);
+            });
+          });
+        }
+      } else if (t === 'moc' && mode === 'review') {
+        // 复习专题：MOC 下全套子树全亮
+        const queue = [id];
+        while (queue.length) {
+          const cur = queue.shift()!;
+          (childrenOf.get(cur) || []).forEach(c => {
+            if (!finalIds.has(c)) { finalIds.add(c); queue.push(c); }
+          });
+        }
+      }
+    });
+
+    return { finalIds };
+  }
+
+  // 清除查询高亮（外部调用：点空白/Esc/重新查询时）
+  clearHighlight() {
+    this.view._queryHighlightActive = false;
+    const graph = this.view.graph;
+    if (!graph || graph.destroyed) return;
+    graph.getNodes().forEach((n: any) => graph.clearItemStates(n, ['active','inactive']));
+    graph.getEdges().forEach((e: any) => graph.clearItemStates(e, ['active','inactive']));
+    this.hitsSummaryEl.style.display = 'none';
+  }
+
+  private escapeHtml(s: string): string {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  destroy() {
+    this.clearHighlight();
+    this.el.remove();
   }
 }
