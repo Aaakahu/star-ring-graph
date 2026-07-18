@@ -1,0 +1,12 @@
+{
+  "sources": [
+    {
+      "name": "高数",
+      "mocFolder": "1_高等数学Moc",
+      "flashFolder": "StudyGuide/Flash",
+      "errorFolder": "StudyGuide/Errors"
+    }
+  ],
+  "layout": "sector",
+  "detailZoom": 1.5
+}

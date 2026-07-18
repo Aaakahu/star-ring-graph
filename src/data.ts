@@ -1,20 +1,20 @@
-// 数据管道：从 vault 读取极限章数据，组装成 d3.hierarchy 需要的树结构
+// 数据管道：从 vault 读思维树 + Flash/Error 卡片，按 frontmatter 双链组装树结构。
+// 挂载证据来自 StudyGuide 写入的 frontmatter 字段（mindtree / flash），不运行时重算匹配。
+// 文档参考：MOUNTING_DESIGN.md
 import { App, TFile, TFolder } from "obsidian";
 
 // 星环节点类型
 export interface RingNode {
   name: string;
-  type: string;        // root / chapter / moc1..mocN / Frag / Error
+  type: string;        // root / chapter / moc1..mocN / flash / error
   children?: RingNode[];
   _filePath?: string;  // 对应的 md 文件路径（用于点击打开）
+  _auxLinks?: string[]; // 辅助连线目标 basename 列表（mindtree[1..] 或 flash[1..]，不进树结构，只画装饰边）
 }
 
 // 思维树前缀 → {depth, 父前缀}
-// "2.1.1.2.4_标题" → {nums:[2,1,1,2,4], depth:5, parent:"2.1.1.2"}
 function parsePrefix(name: string): { nums: number[]; depth: number; parentKey: string | null } | null {
-  // 去掉路径和扩展名
   const base = name.split("/").pop()!.replace(/\.md$/, "");
-  // 匹配 2.1.1.2.4_ 前缀（章封面 2_(01-A) 特殊处理）
   const m = base.match(/^(\d+(?:\.\d+)*)_/);
   if (!m) return null;
   const nums = m[1].split(".").map(Number);
@@ -23,7 +23,7 @@ function parsePrefix(name: string): { nums: number[]; depth: number; parentKey: 
   return { nums, depth, parentKey };
 }
 
-// 解析 frontmatter（简易 YAML 解析，只取顶层 key:value）
+// 解析 frontmatter（简易 YAML 解析，只取顶层 key:value + 列表项）
 function parseFrontmatter(content: string): Record<string, any> {
   const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!m) return {};
@@ -56,18 +56,6 @@ function parseFrontmatter(content: string): Record<string, any> {
   return fm;
 }
 
-// 提取正文里的 wikilink（含 %%[[...]]%% 注释形式）
-function extractWikilinks(content: string): string[] {
-  const links: string[] = [];
-  // 匹配 [[xxx]] 或 [[xxx|alias]] 或 %%[[xxx]]%%
-  const re = /\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g;
-  let m;
-  while ((m = re.exec(content)) !== null) {
-    links.push(m[1].trim());
-  }
-  return [...new Set(links)];
-}
-
 // depth → type 映射
 function depthToType(depth: number): string {
   if (depth === 0) return "root";
@@ -75,36 +63,50 @@ function depthToType(depth: number): string {
   return "moc" + (depth - 1);  // moc1, moc2, moc3...
 }
 
-// 主入口：构建指定章节的完整树
-export async function buildChapterTree(app: App, settings: any): Promise<RingNode> {
-  const chapterRegex = new RegExp("^" + settings.chapterPrefix + "[_\\.]");
-  // topic 筛选关键词：用根节点名的第一个词（如"极限与无穷小"→"极限"）
-  const topicKeyword = settings.rootName.split(/[\s与]/)[0] || settings.rootName;
-  // ========== 1. 读思维树 ==========
-  const mocFolder = app.vault.getAbstractFileByPath(settings.mindTreeFolder);
-  const mindTreeFiles: TFile[] = [];
-  if (mocFolder instanceof TFolder) {
-    collectMarkdownFiles(mocFolder, mindTreeFiles);
-  }
-  // 只取指定章节前缀的文件（如 2_ 开头 = 极限章）
-  const limitFiles = mindTreeFiles.filter(f => {
-    const base = f.name.replace(/\.md$/, "");
-    return chapterRegex.test(base);
-  });
+// wikilink 字符串 → basename。 "[[2.3.4_泰勒公式展开]]" → "2.3.4_泰勒公式展开"
+const wikilinkToBasename = (wl: string): string => {
+  const m = wl.match(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/);
+  return m ? m[1].trim() : wl.trim();
+};
 
-  // 用前缀做 key，构建思维树节点 map
-  interface MTNode { node: RingNode; nums: number[]; parentKey: string | null; prefix: string; file: TFile }
+// 递归收集文件夹下所有 md（排除 0_ 思维树根文件，文档 §2.3 要求排除）
+function collectMarkdownFiles(folder: TFolder, out: TFile[]) {
+  for (const child of folder.children) {
+    if (child instanceof TFile && child.extension === "md") {
+      const base = child.name.replace(/\.md$/, "");
+      if (/^0_/.test(base)) continue; // 思维树根（0_思维树.md）不参与挂载/显示
+      out.push(child);
+    } else if (child instanceof TFolder) {
+      collectMarkdownFiles(child, out);
+    }
+  }
+}
+
+// ============ 单源构建 ============
+// 一个 source = { mocFolder, flashFolder, errorFolder }
+// 返回该源的根 RingNode（章封面作根，或合成根）
+interface SourceConfig { name: string; mocFolder: string; flashFolder: string; errorFolder: string; }
+
+async function buildSourceTree(app: App, src: SourceConfig): Promise<RingNode | null> {
+  // ========== 1. 读思维树 ==========
+  const mocFolder = app.vault.getAbstractFileByPath(src.mocFolder);
+  const mindTreeFiles: TFile[] = [];
+  if (mocFolder instanceof TFolder) collectMarkdownFiles(mocFolder, mindTreeFiles);
+
+  if (mindTreeFiles.length === 0) return null;
+
+  // mtMap: prefix → { node, parentKey, file }
+  interface MTNode { node: RingNode; parentKey: string | null; file: TFile; basename: string }
   const mtMap = new Map<string, MTNode>();
-  for (const f of limitFiles) {
+  let chapterCover: RingNode | null = null; // 章封面（如 2_(01-A) 极限与无穷小）作根
+
+  for (const f of mindTreeFiles) {
     const parsed = parsePrefix(f.path);
     const base = f.name.replace(/\.md$/, "");
     if (!parsed) {
-      // 章封面（如 2_(01-A) 极限与无穷小），无标准前缀，作为根
-      if (chapterRegex.test(base)) {
-        mtMap.set("root", {
-          node: { name: settings.rootName, type: "root", _filePath: f.path, children: [] },
-          nums: [parseInt(settings.chapterPrefix)], parentKey: null, prefix: settings.chapterPrefix, file: f
-        });
+      // 无标准前缀 → 章封面（如 2_(01-A)...），作根。若已有根，跳过多余的
+      if (!chapterCover) {
+        chapterCover = { name: base.replace(/^[\d.]*[_\s]*/, "").replace(/^\([\dA-Z\-]+\)\s*/, "") || base, type: "root", _filePath: f.path, children: [] };
       }
       continue;
     }
@@ -116,32 +118,35 @@ export async function buildChapterTree(app: App, settings: any): Promise<RingNod
         _filePath: f.path,
         children: []
       },
-      nums: parsed.nums,
       parentKey: parsed.parentKey,
-      prefix,
-      file: f
+      file: f,
+      basename: base,  // 含前缀的 basename，用于匹配 wikilink
     });
   }
 
+  // 合成根（无章封面时兜底）
+  const rootNode: RingNode = chapterCover || { name: src.name, type: "root", children: [] };
+
   // 组装父子关系
-  const roots: RingNode[] = [];
-  for (const [prefix, mt] of mtMap) {
+  for (const [, mt] of mtMap) {
     if (mt.parentKey && mtMap.has(mt.parentKey)) {
       mtMap.get(mt.parentKey)!.node.children!.push(mt.node);
-    } else if (mt.parentKey === null) {
-      roots.push(mt.node);
     } else {
-      // 父不在 map（如 2.1 的父是 root）
-      const rootMt = mtMap.get("root");
-      if (rootMt) rootMt.node.children!.push(mt.node);
-      else roots.push(mt.node);
+      // 父不在 map（如 2.1 的父是 root 章），挂根
+      rootNode.children!.push(mt.node);
     }
   }
 
-  const rootNode = roots[0] || { name: settings.rootName, type: "root", children: [] };
+  // basename → RingNode 查找表（用于 Flash.mindtree 匹配 MOC）
+  // 含前缀 basename（"2.3.4_泰勒公式展开"）和纯标题名（"泰勒公式展开"）都建索引
+  const mocByBasename = new Map<string, RingNode>();
+  for (const [, mt] of mtMap) {
+    mocByBasename.set(mt.basename, mt.node);
+    mocByBasename.set(mt.basename.toLowerCase(), mt.node);
+  }
 
   // ========== 2. 读 Flash ==========
-  const flashFolder = app.vault.getAbstractFileByPath(settings.flashFolder);
+  const flashFolder = app.vault.getAbstractFileByPath(src.flashFolder);
   const flashFiles: TFile[] = [];
   if (flashFolder instanceof TFolder) {
     for (const f of flashFolder.children) {
@@ -149,53 +154,41 @@ export async function buildChapterTree(app: App, settings: any): Promise<RingNod
     }
   }
 
-  // 找最大思维树 depth（决定 Frag 接在哪一环之后）
-  let maxMTDepth = 1;
-  for (const [, mt] of mtMap) {
-    if (mt.nums.length > maxMTDepth) maxMTDepth = mt.nums.length;
-  }
+  // flash basename → RingNode（供 Error.flash 匹配）
+  const flashByBasename = new Map<string, RingNode>();
 
-  // 构建 name→node 的扁平查找表（用于 flash 挂载）
-  const nodeByName = new Map<string, RingNode>();
-  const indexTree = (n: RingNode) => {
-    nodeByName.set(n.name, n);
-    nodeByName.set(n.name.toLowerCase(), n);
-    n.children?.forEach(indexTree);
-  };
-  indexTree(rootNode);
-
-  // flash 挂载：parent 字段优先，否则 topic 降级匹配
-  const flashNodes: RingNode[] = [];
   for (const f of flashFiles) {
     const content = await app.vault.read(f);
     const fm = parseFrontmatter(content);
-    if (!fm.topic || !String(fm.topic).includes(topicKeyword)) continue;
+    // 挂载目标来自 frontmatter 的 mindtree 字段（文档 §5.2）
+    const mindtree: string[] = Array.isArray(fm.mindtree) ? fm.mindtree : [];
+    if (mindtree.length === 0) continue; // 文档 §4.3：无匹配不挂载
+
     const flashNode: RingNode = {
       name: fm.title || f.basename,
-      type: "Frag",
+      type: "flash",
       _filePath: f.path,
       children: []
     };
-    // 挂载点
-    let mountNode: RingNode | undefined;
-    if (fm.parent) {
-      mountNode = nodeByName.get(String(fm.parent)) || nodeByName.get(String(fm.parent).toLowerCase());
+
+    // 主挂：mindtree[0] → MOC 节点
+    const primaryTarget = wikilinkToBasename(mindtree[0]);
+    const primaryMoc = mocByBasename.get(primaryTarget) || mocByBasename.get(primaryTarget.toLowerCase());
+    if (!primaryMoc) continue; // 目标 MOC 不存在（可能跨学科），跳过
+
+    primaryMoc.children!.push(flashNode);
+
+    // 辅连线：mindtree[1..4] 记录到 _auxLinks，后续转成 aux 边
+    if (mindtree.length > 1) {
+      flashNode._auxLinks = mindtree.slice(1).map(wikilinkToBasename);
     }
-    if (!mountNode) {
-      // topic 降级：极限/函数极限 → 找含"函数极限"的节点
-      const topicParts = String(fm.topic).split("/");
-      const keyword = topicParts[topicParts.length - 1]; // 如 "函数极限"
-      for (const [name, node] of nodeByName) {
-        if (name.includes(keyword)) { mountNode = node; break; }
-      }
-    }
-    if (!mountNode) mountNode = rootNode; // 兜底挂根
-    mountNode.children!.push(flashNode);
-    flashNodes.push(flashNode);
+
+    flashByBasename.set(f.basename, flashNode);
+    flashByBasename.set(f.basename.toLowerCase(), flashNode);
   }
 
   // ========== 3. 读 Error ==========
-  const errorFolder = app.vault.getAbstractFileByPath(settings.errorFolder);
+  const errorFolder = app.vault.getAbstractFileByPath(src.errorFolder);
   const errorFiles: TFile[] = [];
   if (errorFolder instanceof TFolder) {
     for (const f of errorFolder.children) {
@@ -203,55 +196,57 @@ export async function buildChapterTree(app: App, settings: any): Promise<RingNod
     }
   }
 
-  // flash name → node 查找表
-  const flashByName = new Map<string, RingNode>();
-  flashNodes.forEach(fn => {
-    flashByName.set(fn.name, fn);
-    flashByName.set(fn.name.toLowerCase(), fn);
-  });
-
   for (const f of errorFiles) {
     const content = await app.vault.read(f);
     const fm = parseFrontmatter(content);
-    if (!fm.topic || !String(fm.topic).includes(topicKeyword)) continue;
+    // 挂载目标来自 frontmatter 的 flash 字段（文档 §5.3）
+    const flashLinks: string[] = Array.isArray(fm.flash) ? fm.flash : [];
+    if (flashLinks.length === 0) continue; // 无匹配不挂载
+
     const errorNode: RingNode = {
       name: fm.title || f.basename,
-      type: "Error",
+      type: "error",
       _filePath: f.path,
       children: []
     };
-    // 挂载点：正文 %%[[flash名]]%% 链接
-    const links = extractWikilinks(content);
-    let mounted = false;
-    for (const link of links) {
-      const flashNode = flashByName.get(link) || flashByName.get(link.toLowerCase());
-      if (flashNode) {
-        flashNode.children!.push(errorNode);
-        mounted = true;
-        break;
-      }
+
+    // 主挂：flash[0] → Flash 节点
+    const primaryTarget = wikilinkToBasename(flashLinks[0]);
+    const primaryFlash = flashByBasename.get(primaryTarget) || flashByBasename.get(primaryTarget.toLowerCase());
+    if (!primaryFlash) continue; // 目标 Flash 不存在，跳过
+
+    primaryFlash.children!.push(errorNode);
+
+    // 辅连线：flash[1..2] → 其他 Flash 节点
+    if (flashLinks.length > 1) {
+      errorNode._auxLinks = flashLinks.slice(1).map(wikilinkToBasename);
     }
-    if (!mounted) {
-      // 兜底：挂到第一个 flash
-      if (flashNodes.length > 0) flashNodes[0].children!.push(errorNode);
-    }
+    // 注意：Error.mindtree 字段不读、不画边（图谱不画 Error→MOC 参考边，方案 Y 共识）
   }
 
   return rootNode;
 }
 
-// 递归收集文件夹下所有 md
-function collectMarkdownFiles(folder: TFolder, out: TFile[]) {
-  for (const child of folder.children) {
-    if (child instanceof TFile && child.extension === "md") {
-      // 排除配置/索引文件（0_ 和 1x_ 开头）
-      const base = child.name.replace(/\.md$/, "");
-      if (/^0_/.test(base) || /^1[0-9]_/.test(base)) continue;
-      out.push(child);
-    } else if (child instanceof TFolder) {
-      collectMarkdownFiles(child, out);
-    }
+// ============ 主入口：合并多源 ============
+export async function buildChapterTree(app: App, settings: any): Promise<RingNode> {
+  const sources: SourceConfig[] = settings.sources || [];
+  if (sources.length === 0) {
+    return { name: "空", type: "root", children: [] };
   }
+
+  // 单源：直接返回该源根
+  if (sources.length === 1) {
+    const tree = await buildSourceTree(app, sources[0]);
+    return tree || { name: sources[0].name, type: "root", children: [] };
+  }
+
+  // 多源：合成根，各源作为子树
+  const syntheticRoot: RingNode = { name: "Vault", type: "root", children: [] };
+  for (const src of sources) {
+    const tree = await buildSourceTree(app, src);
+    if (tree) syntheticRoot.children!.push(tree);
+  }
+  return syntheticRoot;
 }
 
 // ========== G6 数据转换 ==========
@@ -264,9 +259,9 @@ export interface G6Node {
   style?: any;
   labelCfg?: any;
   _filePath?: string;
-  _originalType?: string; // 保留原始类型信息
-  level?: number; // 层级：0=根, 1=章节, 2=MOC/知识点, 3=碎片, 4=错题
-  chapterId?: string; // 所属章节节点 id（level≤1 用自身 id）
+  _originalType?: string;
+  level?: number;
+  chapterId?: string;
   x?: number;
   y?: number;
   collapsed?: boolean;
@@ -276,6 +271,7 @@ export interface G6Edge {
   source: string;
   target: string;
   style?: any;
+  relation?: 'tree' | 'aux';  // tree=父子结构边（参与布局），aux=辅连线装饰边（不参与布局）
 }
 
 export interface G6Data {
@@ -287,57 +283,54 @@ export interface G6Data {
 export function convertToG6Data(rootNode: RingNode): G6Data {
   const nodes: G6Node[] = [];
   const edges: G6Edge[] = [];
-  const nodeIdMap = new Map<string, string>(); // name -> id
-
-  // 递归遍历树，生成节点和边
+  // id 纯自增：同名节点（不同 Flash 卡同名、不同源同名 MOC）也分配独立 id。
+  // 旧版用 name 去重会导致 G6 报 "id node_X is unique" 警告，第二个同名节点被吞。
   let nodeIdCounter = 0;
-  const generateNodeId = (name: string): string => {
-    if (nodeIdMap.has(name)) {
-      return nodeIdMap.get(name)!;
-    }
-    const id = `node_${nodeIdCounter++}`;
-    nodeIdMap.set(name, id);
-    return id;
-  };
+  const generateNodeId = (): string => `node_${nodeIdCounter++}`;
+  // basename → id（辅连线目标用 basename 匹配；同名取最后注册的，是合理 fallback）
+  const idByBasename = new Map<string, string>();
+
+  // 先收集所有节点 id（含 basename 索引），再处理辅连线
+  const nodeMeta: { node: RingNode; id: string; basename: string }[] = [];
 
   const traverse = (node: RingNode, parentId: string | null = null, chapterId: string | null = null) => {
-    const nodeId = generateNodeId(node.name);
+    const nodeId = generateNodeId();
 
-    // 按层级着色：0=根, 1=章节, 2=MOC/知识点, 3=碎片, 4=错题
+    // basename 从 _filePath 推（含前缀的文件名，MOC 辅连线匹配用）
+    const basename = node._filePath ? node._filePath.split("/").pop()!.replace(/\.md$/, "") : node.name;
+    idByBasename.set(basename, nodeId);
+    idByBasename.set(basename.toLowerCase(), nodeId);
+    nodeMeta.push({ node, id: nodeId, basename });
+
     let level = 0;
     if (node.type === "root") level = 0;
     else if (node.type === "chapter") level = 1;
     else if (node.type === "MOC" || node.type.startsWith("moc")) level = 2;
-    else if (node.type === "Frag") level = 3;
-    else if (node.type === "Error") level = 4;
+    else if (node.type === "flash") level = 3;
+    else if (node.type === "error") level = 4;
     else level = 2;
 
-    // level≤1 的节点（根/章节）作为自己后代归属的章节，向下传
     const myChapter = level <= 1 ? nodeId : (chapterId || nodeId);
 
-    // 按层级颜色映射
     const levelColorMap: Record<number, { fill: string; stroke: string; shadowBlur: number }> = {
-      0: { fill: "#f0a94f", stroke: "#c4883f", shadowBlur: 12 }, // 根节点：金色
-      1: { fill: "#4f8ff7", stroke: "#3d7bd4", shadowBlur: 8 },  // 章节：蓝色
-      2: { fill: "#4fd1c5", stroke: "#3db8ad", shadowBlur: 0 },  // 知识点：青色
-      3: { fill: "#e06c75", stroke: "#c4555e", shadowBlur: 0 },  // 碎片：暗红
-      4: { fill: "#c678dd", stroke: "#a35bb8", shadowBlur: 0 },  // 错题：粉紫（区别于碎片暗红）
+      0: { fill: "#f0a94f", stroke: "#c4883f", shadowBlur: 12 },
+      1: { fill: "#4f8ff7", stroke: "#3d7bd4", shadowBlur: 8 },
+      2: { fill: "#4fd1c5", stroke: "#3db8ad", shadowBlur: 10 },
+      3: { fill: "#e06c75", stroke: "#c4555e", shadowBlur: 0 },  // flash：暗红
+      4: { fill: "#c678dd", stroke: "#a35bb8", shadowBlur: 0 },  // error：粉紫
     };
-
     const color = levelColorMap[level] || levelColorMap[2];
 
-    // 按层级差异化节点大小和文字
     const levelConfig = [
-      { size: 32, font: 13, opacity: 1 },      // 0 根
-      { size: 22, font: 10, opacity: 1 },       // 1 章节
-      { size: 14, font: 9, opacity: 0.85 },    // 2 知识点
-      { size: 9, font: 0, opacity: 0 },         // 3 碎片/错题默认隐藏文字
+      { size: 32, font: 13, opacity: 1 },
+      { size: 22, font: 10, opacity: 1 },
+      { size: 14, font: 9, opacity: 0.85 },
+      { size: 9, font: 0, opacity: 0 },
     ][Math.min(level, 3)];
 
-    const g6Node: G6Node = {
+    nodes.push({
       id: nodeId,
       label: node.name,
-      // ponytail: 不设 type，让 G6 的 defaultNode.type('wrapped-label-node') 生效；否则硬编码 circle 会覆盖它
       size: levelConfig.size,
       style: {
         fill: color.fill,
@@ -347,41 +340,61 @@ export function convertToG6Data(rootNode: RingNode): G6Data {
         shadowBlur: color.shadowBlur,
       },
       labelCfg: {
-        style: {
-          fontSize: levelConfig.font,
-          fill: "#d0d0d0",
-          opacity: levelConfig.opacity,
-        },
+        style: { fontSize: levelConfig.font, fill: "#d0d0d0", opacity: levelConfig.opacity },
         position: 'bottom',
       },
       _filePath: node._filePath,
       _originalType: node.type,
-      level: level, // 添加层级字段
-      chapterId: myChapter, // 扇区布局按此归扇区
-    };
+      level,
+      chapterId: myChapter,
+    });
 
-    nodes.push(g6Node);
-
-    // 如果有父节点，创建边
     if (parentId) {
-      edges.push({
-        source: parentId,
-        target: nodeId,
-        style: {
-          stroke: "#999",
-          lineWidth: 1,
-          endArrow: false
-        }
-      });
+      edges.push({ source: parentId, target: nodeId, relation: 'tree' });
     }
 
-    // 递归处理子节点（把当前章节 id 传下去）
     if (node.children && node.children.length > 0) {
       node.children.forEach(child => traverse(child, nodeId, myChapter));
     }
   };
 
   traverse(rootNode);
+
+  // 辅连线：遍历每个节点的 _auxLinks，转成 aux 边
+  // 目标可能不在当前图里（跨学科、文件不存在），找不到就跳过
+  for (const { node, id } of nodeMeta) {
+    if (!node._auxLinks || node._auxLinks.length === 0) continue;
+    for (const targetBasename of node._auxLinks) {
+      const targetId = idByBasename.get(targetBasename) || idByBasename.get(targetBasename.toLowerCase());
+      if (targetId && targetId !== id) {
+        edges.push({ source: id, target: targetId, relation: 'aux' });
+      }
+    }
+  }
+
+  // _hasCloud halo 标记（保留原逻辑：MOC 有 level≥3 后代则发光）
+  const childrenOf = new Map<string, string[]>();
+  edges.forEach(e => {
+    if (e.relation !== 'tree') return; // 辅连线不参与 halo 判定
+    if (!childrenOf.has(e.source)) childrenOf.set(e.source, []);
+    childrenOf.get(e.source)!.push(e.target);
+  });
+  const hasCloudDescendant = (startId: string): boolean => {
+    const queue: string[] = [startId];
+    const seen = new Set<string>();
+    while (queue.length) {
+      const cur = queue.shift()!;
+      if (seen.has(cur)) continue;
+      seen.add(cur);
+      const n = nodes.find(x => x.id === cur);
+      if (n && cur !== startId && (n.level ?? 0) >= 3) return true;
+      (childrenOf.get(cur) || []).forEach(c => queue.push(c));
+    }
+    return false;
+  };
+  nodes.forEach(n => {
+    if ((n.level ?? 0) === 2) (n as any)._hasCloud = hasCloudDescendant(n.id);
+  });
 
   return { nodes, edges };
 }

@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>星环图谱 × LightRAG：集成效果对比演示</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    background: #0f1729;
+    color: #e2e8f0;
+    font-family: -apple-system, "Microsoft YaHei", sans-serif;
+    margin: 0; padding: 24px;
+  }
+  h1 { text-align: center; font-size: 20px; margin: 0 0 6px; }
+  .subtitle { text-align: center; color: #94a3b8; font-size: 13px; margin-bottom: 20px; line-height: 1.6; }
+  .subtitle b { color: #fbbf24; }
+  .container { display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; }
+  .panel {
+    background: #16213e;
+    border: 1px solid #233356;
+    border-radius: 10px;
+    padding: 16px;
+    width: 660px;
+  }
+  .panel h2 { font-size: 15px; margin: 0 0 4px; text-align: center; }
+  .panel .desc { font-size: 11px; color: #94a3b8; text-align: center; margin-bottom: 10px; line-height: 1.55; }
+  svg { display: block; margin: 0 auto; background: #0a1124; border-radius: 6px; }
+  .legend { display: flex; gap: 10px; justify-content: center; margin-top: 10px; font-size: 11px; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .note {
+    margin-top: 10px; padding: 10px;
+    background: #1e293b; border-left: 3px solid #fbbf24;
+    border-radius: 4px; font-size: 11px; line-height: 1.65; color: #cbd5e1;
+  }
+  .note b { color: #fbbf24; }
+  .note.muted { border-left-color: #64748b; }
+  .note.muted b { color: #94a3b8; }
+
+  /* ===== 查询浮层（右侧独有）===== */
+  .query-bar {
+    display: flex; gap: 8px; align-items: center; margin-bottom: 8px;
+  }
+  .query-bar input[type=text] {
+    flex: 1; background: #0a1124; border: 1px solid #233356; color: #e2e8f0;
+    padding: 8px 12px; border-radius: 6px; font-size: 13px; font-family: inherit;
+  }
+  .query-bar input[type=text]:focus { outline: none; border-color: #fbbf24; }
+  .query-bar select {
+    background: #0a1124; border: 1px solid #233356; color: #e2e8f0;
+    padding: 8px 8px; border-radius: 6px; font-size: 12px; font-family: inherit;
+    cursor: pointer;
+  }
+  .query-bar button {
+    background: #fbbf24; color: #0f1729; border: none; padding: 8px 18px;
+    border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer;
+    transition: all 0.15s;
+  }
+  .query-bar button:hover { background: #f59e0b; transform: translateY(-1px); }
+  .query-bar button:active { transform: translateY(0); }
+
+  .answer-box {
+    background: #0a1124; border: 1px solid #233356; border-radius: 6px;
+    padding: 12px 14px; margin-bottom: 8px; font-size: 12px; line-height: 1.7;
+    color: #cbd5e1; max-height: 110px; overflow-y: auto;
+  }
+  .answer-box .ans-label {
+    font-size: 10px; color: #fbbf24; letter-spacing: 0.5px; margin-bottom: 4px;
+    text-transform: uppercase;
+  }
+  .answer-box .ans-loading { color: #64748b; font-style: italic; }
+
+  /* ===== 命中实体侧栏 ===== */
+  .hits-panel {
+    background: #1e293b; border-radius: 6px; padding: 10px 12px; margin-top: 8px;
+    font-size: 11px;
+  }
+  .hits-title {
+    color: #fbbf24; font-weight: 600; margin-bottom: 6px; font-size: 12px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .hits-title .badge {
+    background: #fbbf24; color: #0f1729; padding: 1px 8px; border-radius: 10px;
+    font-size: 10px; font-weight: 700;
+  }
+  .hit-row {
+    display: flex; align-items: center; gap: 8px; padding: 4px 0;
+    border-bottom: 1px solid #233356; color: #cbd5e1;
+  }
+  .hit-row:last-child { border-bottom: none; }
+  .hit-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    box-shadow: 0 0 8px currentColor;
+  }
+  .hit-name { color: #fbbf24; font-weight: 600; min-width: 80px; }
+  .hit-arrow { color: #64748b; }
+  .hit-path { color: #94a3b8; font-size: 10px; font-family: 'Consolas', monospace; cursor: pointer; }
+  .hit-path:hover { color: #fbbf24; text-decoration: underline; }
+
+  /* ===== 节点状态（active 发光脉冲 / inactive 暗化）===== */
+  .node-active {
+    animation: pulse 1.6s ease-in-out infinite;
+    transform-origin: center;
+    transform-box: fill-box;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; filter: brightness(1.4); }
+  }
+  .node-inactive { opacity: 0.08; transition: opacity 0.4s; }
+  .node-inactive + text { opacity: 0.08; transition: opacity 0.4s; }
+  .edge-active { stroke: #fbbf24 !important; stroke-width: 1.8 !important; opacity: 1 !important; }
+  .edge-inactive { opacity: 0.03 !important; }
+
+  .hint {
+    text-align: center; margin-top: 20px; color: #64748b; font-size: 11px;
+  }
+  .hint code {
+    background: #1e293b; padding: 2px 6px; border-radius: 3px; color: #fbbf24;
+  }
+</style>
+</head>
+<body>
+<h1>星环图谱 × LightRAG — 集成效果对比</h1>
+<div class="subtitle">
+  左：<b>现状</b>（纯静态图谱，无查询） ｜ 右：<b>集成 LightRAG 后</b>（GLM 抽实体 + 向量检索 + 答案 + 命中节点发光）
+</div>
+<div class="container">
+
+  <!-- ============ 左：现状 ============ -->
+  <div class="panel">
+    <h2>修改前：纯星环图（无查询）</h2>
+    <div class="desc">只有可视化。点击节点能跳笔记，但不能<b>问问题</b>、不能<b>语义检索</b>、不能看到"<b>哪些知识与此相关</b>"。</div>
+    <svg id="before" width="620" height="540" viewBox="0 0 620 540"></svg>
+    <div class="legend" id="legendBefore"></div>
+    <div class="note muted">
+      <b>现状：</b>所有节点同等亮度，用户必须自己肉眼找知识点。<br>
+      <b>痛点：</b>451 篇笔记里找"数列极限怎么求"——只能靠手动翻 MOC 树，或 Obsidian 全文搜（不懂语义）。<br>
+      <b>无：</b>自然语言查询、答案生成、相关实体高亮、跨章节关联发现。
+    </div>
+  </div>
+
+  <!-- ============ 右：集成后 ============ -->
+  <div class="panel">
+    <h2>集成 LightRAG 后：4 个针对你卡片结构的学习动作</h2>
+    <div class="desc">
+      针对 MOC / Flash(know_what·know_how·know_why) / Error 三层卡片结构定制查询。<br>
+      输入关键词 → 选学习动作 → 命中卡片在星环上发光 + 答案 + 侧栏分组列出。
+    </div>
+
+    <div class="query-bar">
+      <input type="text" id="q" value="泰勒展开" placeholder="输入知识点 / 套路 / 错题关键词…">
+      <select id="mode" title="4 个针对你三层卡片结构的学习动作">
+        <option value="concept">📖 学概念（MOC + 是什么）</option>
+        <option value="method">🛠 找方法（怎么做 Flash）</option>
+        <option value="error">⚠ 查错题（Error + 错因）</option>
+        <option value="review">📚 复习专题（全套）</option>
+      </select>
+      <select id="structOpt" title="是否利用你的 MOC/Flash/Error 三层结构做优化">
+        <option value="on">结构优化：开（推荐）</option>
+        <option value="off">结构优化：关（纯 LightRAG）</option>
+      </select>
+      <button onclick="runQuery()">查询</button>
+    </div>
+
+    <div class="answer-box" id="answer">
+      <div class="ans-label">GLM-5.2 答案</div>
+      <div id="ansBody">数列极限的求解常用 <b>ε-N 定义法</b>：对任意 ε&gt;0 找 N 使 n&gt;N 时 |xₙ-a|&lt;ε。技巧上，<b>夹逼准则</b>放缩上下界、<b>单调有界定理</b>证收敛，是两条主力路径。反例（如 sin n 有界但不收敛）用于排除。</div>
+    </div>
+
+    <svg id="after" width="620" height="380" viewBox="0 0 620 380"></svg>
+    <div class="legend" id="legendAfter"></div>
+
+    <div class="hits-panel">
+      <div class="hits-title">
+        <span>命中实体 → 映射到星环节点</span>
+        <span><span class="badge" id="hitCount">3</span> 个</span>
+      </div>
+      <div id="hitsList"></div>
+    </div>
+
+    <div class="note">
+      <b>集成价值：</b>① 问问题拿答案（不用翻笔记）② 命中节点<b>发光脉冲</b>，一眼看见相关知识在哪 ③ 未命中暗化，焦点清晰
+      ④ 侧栏列出每个实体对应的原笔记，<b>点击可跳转</b> ⑤ 跨章节关联（如"夹逼准则"在极限和级数都出现）自动浮现。
+    </div>
+  </div>
+
+</div>
+
+<div class="hint">
+  演示用 mock 数据，未真实调用 LightRAG。<br>
+  <b>4 个动作 = 4 个考研复习场景</b>，切动作 + 切结构优化开关看命中差异：<br>
+  • 输入 <code>泰勒展开</code> + 📖学概念 → 只亮 MOC + 是什么 Flash<br>
+  • 输入 <code>极限怎么求</code> + 🛠找方法 → 只亮怎么做 Flash（know_how），过滤掉定义和错题<br>
+  • 输入 <code>泰勒展开</code> + ⚠查错题 → 亮 Error 卡 + 反查它暴露的 Flash 套路盲点<br>
+  • 输入 <code>数列极限</code> + 📚复习专题 → MOC + 全部 Flash + 全部错题一次性亮<br>
+  <b>关掉结构优化</b>对比：纯 LightRAG 把所有卡片当平权文本，4 个动作结果几乎一样 —— 这就是不优化的代价。
+</div>
+
+<script>
+// ===== TREE 数据（带 subtype，对齐你的真实卡片模板）=====
+// Flash subtype 三类（你的真实分布）：know_what=是什么 / know_how=怎么做 / know_why=为什么
+// 每个 Flash 可下挂 Error（对应你的 frontmatter errors 字段）
+const TREE = {
+  name: "极限与无穷小", type: "root", level: 0, children: [
+    { name: "数列极限", type: "chapter", level: 1, children: [
+      { name: "数列极限定义", type: "moc", level: 2, children: [
+        { name: "ε-N定义精解", type: "Flash", subtype: "know_what", level: 3, children: [] },
+        { name: "ε-N放缩套路", type: "Flash", subtype: "know_how", level: 3, children: [] },
+        { name: "唯一性反例速记", type: "Flash", subtype: "know_why", level: 3, children: [] }
+      ]},
+      { name: "收敛准则", type: "moc", level: 2, children: [
+        { name: "夹逼放缩技巧", type: "Flash", subtype: "know_how", level: 3, children: [
+          { name: "1992数二(夹逼)", type: "Error", level: 4 }
+        ]},
+        { name: "单调有界建数列法", type: "Flash", subtype: "know_how", level: 3, children: [
+          { name: "错题1(单调有界)", type: "Error", level: 4 }
+        ]},
+        { name: "子列反例速查", type: "Flash", subtype: "know_why", level: 3, children: [] }
+      ]}
+    ]},
+    { name: "函数极限", type: "chapter", level: 1, children: [
+      { name: "函数极限定义", type: "moc", level: 2, children: [
+        { name: "ε-δ定义精解", type: "Flash", subtype: "know_what", level: 3, children: [] },
+        { name: "左右极限求法", type: "Flash", subtype: "know_how", level: 3, children: [] },
+        { name: "几何意义速记", type: "Flash", subtype: "know_what", level: 3, children: [] }
+      ]},
+      { name: "极限计算工具", type: "moc", level: 2, children: [
+        { name: "泰勒展开套路", type: "Flash", subtype: "know_how", level: 3, children: [
+          { name: "1991数二(泰勒)", type: "Error", level: 4 },
+          { name: "1992数二(泰勒)", type: "Error", level: 4 }
+        ]},
+        { name: "等价无穷小代换", type: "Flash", subtype: "know_how", level: 3, children: [
+          { name: "1988数一二(代换)", type: "Error", level: 4 }
+        ]},
+        { name: "加减滥用等价无穷小", type: "Flash", subtype: "know_why", level: 3, children: [] },
+        { name: "洛必达使用时机", type: "Flash", subtype: "know_why", level: 3, children: [] }
+      ]},
+      { name: "极限性质", type: "moc", level: 2, children: [
+        { name: "局部有界结论", type: "Flash", subtype: "know_what", level: 3, children: [] },
+        { name: "保号性做题技巧", type: "Flash", subtype: "know_how", level: 3, children: [] },
+        { name: "海涅定理桥接法", type: "Flash", subtype: "know_why", level: 3, children: [
+          { name: "错题2(海涅)", type: "Error", level: 4 }
+        ]}
+      ]}
+    ]},
+    { name: "无穷小", type: "chapter", level: 1, children: [
+      { name: "无穷小比较", type: "moc", level: 2, children: [
+        { name: "等价无穷小替换表", type: "Flash", subtype: "know_what", level: 3, children: [] },
+        { name: "同阶比较速记", type: "Flash", subtype: "know_how", level: 3, children: [] },
+        { name: "高阶记号记忆", type: "Flash", subtype: "know_what", level: 3, children: [] }
+      ]},
+      { name: "等价代换", type: "moc", level: 2, children: [
+        { name: "tanx~x代换", type: "Flash", subtype: "know_how", level: 3, children: [] },
+        { name: "ln(1+x)~x代换", type: "Flash", subtype: "know_how", level: 3, children: [] }
+      ]}
+    ]}
+  ]
+};
+
+const COLORS = { 0:'#f0a94f', 1:'#4f8ff7', 2:'#4fd1c5', 3:'#e06c75', 4:'#c678dd' };
+const SIZES  = { 0:11, 1:8,   2:6,   3:4,   4:3.5 };
+const FONTS  = { 0:13, 1:10,  2:9,   3:7.5, 4:7   };
+
+function flatten(root) {
+  const nodes = [], edges = [];
+  const walk = (n, parent) => {
+    n.x = 0; n.y = 0; n.sw = 0; n.id = nodes.length;
+    nodes.push(n);
+    if (parent) edges.push({ s: parent, t: n });
+    (n.children||[]).forEach(c => walk(c, n));
+  };
+  walk(root, null);
+  return { nodes, edges };
+}
+
+// 真·旭日图布局（同 layout-compare.html 的 afterLayout）
+function afterLayout(root) {
+  const { nodes, edges } = flatten(root);
+  const minSpan = 0.5;
+  const gap = 0.05;
+  const layoutRadial = node => {
+    if (!node.children || !node.children.length) { node.sw = minSpan; return; }
+    let ta = 0; const nc = node.children.length;
+    for (let i = 0; i < nc; i++) {
+      const c = node.children[i];
+      layoutRadial(c);
+      ta += c.sw; if (i < nc - 1) ta += gap;
+    }
+    node.sw = ta;
+  };
+  layoutRadial(root);
+  const baseR = 38, levelGap = 38;
+  const depthRadius = d => d === 0 ? 0 : baseR + d * levelGap;
+  const positionRadial = (node, startAngle, endAngle, depth) => {
+    const r = depthRadius(depth);
+    const mid = (startAngle + endAngle) / 2;
+    node.x = Math.cos(mid) * r;
+    node.y = Math.sin(mid) * r;
+    if (!node.children || !node.children.length) return;
+    const sector = endAngle - startAngle;
+    const totalW = Math.max(node.sw, 0.01);
+    let a = startAngle;
+    for (let i = 0; i < node.children.length; i++) {
+      const ch = node.children[i];
+      const span = (ch.sw / totalW) * sector;
+      positionRadial(ch, a, a + span, depth + 1);
+      a += span;
+    }
+  };
+  positionRadial(root, -Math.PI/2, Math.PI * 1.5, 0);
+  return { nodes, edges };
+}
+
+// ===== 左侧：现状静态渲染（无任何高亮态）=====
+function renderBefore() {
+  const data = afterLayout(JSON.parse(JSON.stringify(TREE)));
+  const svg = document.getElementById('before');
+  svg.innerHTML = '';
+  const NS = 'http://www.w3.org/2000/svg';
+  const cx = 310, cy = 270;
+  [38, 76, 114, 152].forEach(r => {
+    const c = document.createElementNS(NS, 'circle');
+    c.setAttribute('cx', cx); c.setAttribute('cy', cy); c.setAttribute('r', r);
+    c.setAttribute('fill', 'none'); c.setAttribute('stroke', 'rgba(255,255,255,0.07)');
+    c.setAttribute('stroke-width', '0.5');
+    svg.appendChild(c);
+  });
+  data.edges.forEach(e => {
+    const line = document.createElementNS(NS, 'line');
+    line.setAttribute('x1', cx + e.s.x); line.setAttribute('y1', cy + e.s.y);
+    line.setAttribute('x2', cx + e.t.x); line.setAttribute('y2', cy + e.t.y);
+    line.setAttribute('stroke', '#3d4f6f'); line.setAttribute('stroke-width', '0.8');
+    line.setAttribute('opacity', '0.55');
+    svg.appendChild(line);
+  });
+  data.nodes.forEach(n => {
+    const c = document.createElementNS(NS, 'circle');
+    c.setAttribute('cx', cx + n.x); c.setAttribute('cy', cy + n.y);
+    c.setAttribute('r', SIZES[n.level]); c.setAttribute('fill', COLORS[n.level]);
+    c.setAttribute('stroke', 'rgba(255,255,255,0.4)'); c.setAttribute('stroke-width', '0.6');
+    svg.appendChild(c);
+    const t = document.createElementNS(NS, 'text');
+    t.setAttribute('x', cx + n.x); t.setAttribute('y', cy + n.y - SIZES[n.level] - 3);
+    t.setAttribute('text-anchor', 'middle'); t.setAttribute('fill', '#cbd5e1');
+    t.setAttribute('font-size', FONTS[n.level]); t.setAttribute('font-family', 'inherit');
+    t.textContent = n.name;
+    svg.appendChild(t);
+  });
+}
+
+// ===== 右侧：集成后渲染 =====
+let afterData = null;
+// reason 颜色：按"为什么亮"分组
+const REASON_RING = {
+  'semantic':         '#fbbf24',  // LightRAG 语义命中（琥珀）
+  'moc-target':       '#4fd1c5',  // 动作目标 MOC（青）
+  'flash-target':     '#4fd1c5',  // 动作目标 Flash（青）
+  'error-target':     '#f472b6',  // 动作目标 Error（粉）
+  'moc-context':      '#7dd3fc',  // 上下文 MOC（浅蓝）
+  'flash-method-sibling': '#a78bfa', // 同套方法兄弟（紫）
+  'flash-cause':      '#fbbf24',  // Error 反查的 Flash 套路（琥珀）
+  'error-from-flash': '#f472b6',  // Flash 下挂的错题（粉）
+  'error-sibling':    '#c084fc',  // 同主题其他错题（紫粉）
+  'review-all':       '#94a3b8'   // 复习全套（灰）
+};
+const REASON_LABEL = {
+  'semantic': 'LightRAG 语义命中',
+  'moc-target': '目标 MOC',
+  'flash-target': '目标 Flash',
+  'error-target': '目标 Error',
+  'moc-context': '上下文 MOC',
+  'flash-method-sibling': '同套方法兄弟',
+  'flash-cause': 'Error 反查的 Flash 套路',
+  'error-from-flash': 'Flash 下挂的错题',
+  'error-sibling': '同主题其他错题',
+  'review-all': '复习全套'
+};
+function renderAfter(activeIds, reason) {
+  afterData = afterLayout(JSON.parse(JSON.stringify(TREE)));
+  const svg = document.getElementById('after');
+  svg.innerHTML = '';
+  const NS = 'http://www.w3.org/2000/svg';
+  const cx = 310, cy = 190;
+  [38, 76, 114, 152].forEach(r => {
+    const c = document.createElementNS(NS, 'circle');
+    c.setAttribute('cx', cx); c.setAttribute('cy', cy); c.setAttribute('r', r);
+    c.setAttribute('fill', 'none'); c.setAttribute('stroke', 'rgba(255,255,255,0.07)');
+    c.setAttribute('stroke-width', '0.5');
+    svg.appendChild(c);
+  });
+  afterData.edges.forEach(e => {
+    const line = document.createElementNS(NS, 'line');
+    line.setAttribute('x1', cx + e.s.x); line.setAttribute('y1', cy + e.s.y);
+    line.setAttribute('x2', cx + e.t.x); line.setAttribute('y2', cy + e.t.y);
+    line.setAttribute('stroke', '#3d4f6f'); line.setAttribute('stroke-width', '0.8');
+    line.setAttribute('opacity', '0.55');
+    if (activeIds && activeIds.size > 0) {
+      const bothActive = activeIds.has(e.s.id) && activeIds.has(e.t.id);
+      if (bothActive) line.classList.add('edge-active');
+      else line.classList.add('edge-inactive');
+    }
+    svg.appendChild(line);
+  });
+  afterData.nodes.forEach(n => {
+    const g = document.createElementNS(NS, 'g');
+    const c = document.createElementNS(NS, 'circle');
+    c.setAttribute('cx', cx + n.x); c.setAttribute('cy', cy + n.y);
+    c.setAttribute('r', SIZES[n.level]); c.setAttribute('fill', COLORS[n.level]);
+    c.setAttribute('stroke', 'rgba(255,255,255,0.4)'); c.setAttribute('stroke-width', '0.6');
+    if (activeIds && activeIds.size > 0) {
+      if (activeIds.has(n.id)) {
+        c.classList.add('node-active');
+        const ring = (reason && reason.get(n.id)) || 'semantic';
+        c.setAttribute('filter', 'drop-shadow(0 0 8px ' + (REASON_RING[ring] || COLORS[n.level]) + ')');
+      } else {
+        c.classList.add('node-inactive');
+      }
+    }
+    g.appendChild(c);
+    const t = document.createElementNS(NS, 'text');
+    t.setAttribute('x', cx + n.x); t.setAttribute('y', cy + n.y - SIZES[n.level] - 3);
+    t.setAttribute('text-anchor', 'middle');
+    if (activeIds && activeIds.has(n.id)) {
+      const ring = (reason && reason.get(n.id)) || 'semantic';
+      t.setAttribute('fill', REASON_RING[ring] || '#fbbf24');
+    } else {
+      t.setAttribute('fill', '#cbd5e1');
+    }
+    t.setAttribute('font-size', FONTS[n.level]); t.setAttribute('font-family', 'inherit');
+    t.textContent = n.name;
+    if (activeIds && activeIds.size > 0 && !activeIds.has(n.id)) {
+      t.style.opacity = '0.15';
+    }
+    g.appendChild(t);
+    svg.appendChild(g);
+  });
+}
+
+// ===== 查询逻辑：4 个针对你三层卡片结构的学习动作 =====
+// 每个动作 = 一个真实的考研复习场景，命中范围完全不同
+// structOpt=off 时所有动作退化为"纯 LightRAG"（只亮语义匹配的离散点）
+// structOpt=on 时按动作语义 + 你的 mindtree 双链 + subtype 加权扩展
+
+// 动作 → 该动作"要什么类型的卡片"
+const ACTION_TARGET = {
+  concept: {                          // 📖 学概念
+    moc: true,                        //   要 MOC 定义
+    flashSubtypes: ['know_what'],     //   只要"是什么"型 Flash
+    error: false,                     //   不要错题
+    label: '📖 学概念',
+    desc: 'MOC 定义 + 是什么型 Flash'
+  },
+  method: {                           // 🛠 找方法
+    moc: false,                       //   不要 MOC（你已经会定义了）
+    flashSubtypes: ['know_how'],      //   只要"怎么做"型 Flash
+    error: false,
+    label: '🛠 找方法',
+    desc: '怎么做型 Flash（套路/方法）'
+  },
+  error: {                            // ⚠ 查错题
+    moc: false,
+    flashSubtypes: ['know_why'],      //   连带亮"为什么"型 Flash（错因原理）
+    error: true,                      //   核心：Error 卡 + 错因
+    label: '⚠ 查错题',
+    desc: 'Error 卡 + 错因 + 暴露的套路盲点'
+  },
+  review: {                           // 📚 复习专题
+    moc: true,                        //   全套：定义
+    flashSubtypes: ['know_what', 'know_how', 'know_why'],  // 全 subtype
+    error: true,                      //   + 错题
+    label: '📚 复习专题',
+    desc: 'MOC + 全部 Flash + 错题（系统性复习）'
+  }
+};
+
+// 查询词 → LightRAG 语义命中的"主体节点名"（模拟 /query/data 的实体抽取）
+// 真实集成时这部分由 LightRAG 返回，这里 mock 几个典型查询
+const MOCK_SEMANTIC_HIT = {
+  "泰勒展开": ["泰勒展开套路", "加减滥用等价无穷小", "1991数二(泰勒)"],
+  "极限怎么求": ["ε-N放缩套路", "夹逼放缩技巧", "单调有界建数列法", "泰勒展开套路", "等价无穷小代换"],
+  "等价无穷小": ["等价无穷小代换", "加减滥用等价无穷小", "等价无穷小替换表", "1988数一二(代换)"],
+  "数列极限": ["ε-N定义精解", "ε-N放缩套路", "夹逼放缩技巧", "单调有界建数列法"],
+  "我哪里老错": ["1991数二(泰勒)", "1992数二(泰勒)", "1988数一二(代换)", "1992数二(夹逼)"],
+  "错题": ["1991数二(泰勒)", "1992数二(泰勒)", "1988数一二(代换)", "1992数二(夹逼)", "错题1(单调有界)", "错题2(海涅)"]
+};
+
+function findSemanticHits(q) {
+  // 精确匹配
+  if (MOCK_SEMANTIC_HIT[q]) return MOCK_SEMANTIC_HIT[q];
+  // 子串兜底
+  for (const key of Object.keys(MOCK_SEMANTIC_HIT)) {
+    if (key.includes(q) || q.includes(key)) return MOCK_SEMANTIC_HIT[key];
+  }
+  // 最终兜底：按查询词子串匹配所有节点名
+  return afterData.nodes.filter(n => n.name.includes(q) || q.includes(n.name.slice(0,2))).map(n => n.name);
+}
+
+function runQuery() {
+  const q = document.getElementById('q').value.trim();
+  const mode = document.getElementById('mode').value;
+  const structOpt = document.getElementById('structOpt').value;
+  const ansBox = document.getElementById('ansBody');
+  const action = ACTION_TARGET[mode];
+
+  const optLabel = structOpt === 'on' ? '结构优化' : '纯 LightRAG';
+  ansBox.innerHTML = '<span class="ans-loading">⟳ ' + action.label + ' · ' + optLabel + ' 检索中… GLM-5.2 生成答案</span>';
+
+  setTimeout(() => {
+    // Pass 1: LightRAG 语义命中（模拟 /query/data 返回的实体名）
+    const semanticHitNames = findSemanticHits(q);
+    if (semanticHitNames.length === 0) {
+      ansBox.innerHTML = '<span style="color:#94a3b8">（演示未预置此查询。试试：<code>泰勒展开</code> / <code>极限怎么求</code> / <code>等价无穷小</code> / <code>我哪里老错</code> / <code>数列极限</code>）</span>';
+      renderAfter(new Set(), new Map());
+      renderHits(mode, structOpt, new Set(), new Map());
+      return;
+    }
+
+    // 名字 → 节点 id 索引
+    const nameToId = new Map();
+    afterData.nodes.forEach(n => nameToId.set(n.name, n.id));
+
+    // 语义命中的节点 id（LightRAG 直接找到的）
+    const semanticIds = new Set();
+    semanticHitNames.forEach(name => {
+      if (nameToId.has(name)) semanticIds.add(nameToId.get(name));
+    });
+
+    const reason = new Map();   // nodeId -> reason tag
+    const finalIds = new Set();
+
+    if (structOpt === 'off') {
+      // 纯 LightRAG：只亮语义命中，不区分卡片类型，不沿结构扩展
+      semanticIds.forEach(id => { finalIds.add(id); reason.set(id, 'semantic'); });
+    } else {
+      // 结构优化：按动作语义筛选 + 沿 mindtree 扩展
+      // 建父子索引
+      const parentOf = new Map();
+      const childrenOf = new Map();
+      const nodeById = new Map();
+      afterData.edges.forEach(e => {
+        parentOf.set(e.t.id, e.s.id);
+        if (!childrenOf.has(e.s.id)) childrenOf.set(e.s.id, []);
+        childrenOf.get(e.s.id).push(e.t.id);
+      });
+      afterData.nodes.forEach(n => nodeById.set(n.id, n));
+
+      // 从语义命中出发，按动作目标筛选要亮的节点
+      semanticIds.forEach(id => {
+        const node = nodeById.get(id);
+        if (!node) return;
+
+        if (node.type === 'moc') {
+          // 语义命中 MOC：学概念/复习时要，找方法/查错题时不要
+          if (action.moc) { finalIds.add(id); reason.set(id, 'moc-target'); }
+        } else if (node.type === 'Flash') {
+          // 语义命中 Flash：按 subtype 筛
+          if (action.flashSubtypes.includes(node.subtype)) {
+            finalIds.add(id); reason.set(id, 'flash-target');
+          }
+        } else if (node.type === 'Error') {
+          // 语义命中 Error：查错题/复习时要
+          if (action.error) { finalIds.add(id); reason.set(id, 'error-target'); }
+        }
+      });
+
+      // 沿 mindtree 双链扩展（每个动作扩展策略不同）
+      semanticIds.forEach(id => {
+        const node = nodeById.get(id);
+        if (!node) return;
+        const climbMOC = (n) => {
+          let cur = parentOf.get(n.id);
+          while (cur !== undefined) {
+            const p = nodeById.get(cur);
+            if (p && p.type === 'moc') {
+              // 学概念/复习：亮祖先 MOC；查错题：亮 Error 所属的 Flash + 它的 MOC
+              if (action.moc || mode === 'error') {
+                if (!finalIds.has(cur)) { finalIds.add(cur); reason.set(cur, 'moc-context'); }
+              }
+            }
+            cur = parentOf.get(cur);
+          }
+        };
+
+        if (node.type === 'Flash') {
+          climbMOC(node);
+          // 找方法：同 MOC 下的其他 know_how 兄弟（同一套方法体系）
+          if (mode === 'method') {
+            const moc = parentOf.get(id);
+            (childrenOf.get(moc) || []).forEach(sib => {
+              const sn = nodeById.get(sib);
+              if (sn && sn.type === 'Flash' && sn.subtype === 'know_how' && !finalIds.has(sib)) {
+                finalIds.add(sib); reason.set(sib, 'flash-method-sibling');
+              }
+            });
+          }
+          // 查错题/复习：亮该 Flash 下挂的 Error（套路在哪栽过）
+          if (action.error) {
+            (childrenOf.get(id) || []).forEach(child => {
+              if (!finalIds.has(child)) { finalIds.add(child); reason.set(child, 'error-from-flash'); }
+            });
+          }
+        } else if (node.type === 'Error') {
+          // 语义命中 Error：反向找它暴露的 Flash 套路（你 frontmatter 的 flash: 字段）
+          // Error 的父是 Flash
+          const parentFlash = parentOf.get(id);
+          if (parentFlash !== undefined) {
+            if (!finalIds.has(parentFlash)) { finalIds.add(parentFlash); reason.set(parentFlash, 'flash-cause'); }
+            climbMOC(nodeById.get(parentFlash));
+          }
+          // 复习：同 MOC 下的其他错题
+          if (mode === 'review') {
+            const moc = parentOf.get(parentFlash);
+            (childrenOf.get(moc) || []).forEach(sib => {
+              (childrenOf.get(sib) || []).forEach(err => {
+                const en = nodeById.get(err);
+                if (en && en.type === 'Error' && !finalIds.has(err)) {
+                  finalIds.add(err); reason.set(err, 'error-sibling');
+                }
+              });
+            });
+          }
+        } else if (node.type === 'moc' && mode === 'review') {
+          // 复习专题：MOC 下的全套卡片全亮
+          (childrenOf.get(id) || []).forEach(child => {
+            const cn = nodeById.get(child);
+            if (cn && !finalIds.has(child)) { finalIds.add(child); reason.set(child, 'review-all'); }
+            // Flash 下的 Error 也全亮
+            (childrenOf.get(child) || []).forEach(grand => {
+              if (!finalIds.has(grand)) { finalIds.add(grand); reason.set(grand, 'review-all'); }
+            });
+          });
+        }
+      });
+    }
+
+    // 生成答案（按动作定制）
+    const answer = generateAnswer(q, mode, finalIds, reason, afterData.nodes);
+    ansBox.innerHTML = answer;
+
+    renderAfter(finalIds, reason);
+    renderHits(mode, structOpt, finalIds, reason);
+  }, 500);
+}
+
+// 按动作生成不同的答案文案（真实集成时 GLM 生成，这里按动作语义 mock）
+function generateAnswer(q, mode, ids, reason, nodes) {
+  const hitNames = [];
+  ids.forEach(id => {
+    const n = nodes.find(x => x.id === id);
+    if (n) hitNames.push(n.name);
+  });
+  if (mode === 'concept') {
+    return '【学概念模式】围绕 <b>' + q + '</b> 的定义性知识：<br>' +
+      hitNames.filter(n => !n.includes('数二') && !n.includes('错题')).slice(0,4).map(n => '• ' + n).join('<br>') +
+      '<br><span style="color:#94a3b8;font-size:11px">→ 只返回 MOC + 是什么型 Flash，过滤了错题和方法</span>';
+  } else if (mode === 'method') {
+    return '【找方法模式】<b>' + q + '</b> 相关的做题套路：<br>' +
+      hitNames.filter(n => !n.includes('数二') && !n.includes('错题') && !n.includes('定义') && !n.includes('精解')).slice(0,4).map(n => '• ' + n).join('<br>') +
+      '<br><span style="color:#94a3b8;font-size:11px">→ 只返回怎么做型 Flash（know_how），过滤了定义和错题</span>';
+  } else if (mode === 'error') {
+    const errs = hitNames.filter(n => n.includes('数二') || n.includes('数一') || n.includes('错题'));
+    return '【查错题模式】<b>' + q + '</b> 相关的错题 + 错因：<br>' +
+      errs.slice(0,4).map(n => '• ' + n).join('<br>') +
+      '<br><span style="color:#94a3b8;font-size:11px">→ 返回 Error 卡 + 反向定位暴露的 Flash 套路（你 frontmatter 的 flash: 字段）</span>';
+  } else {
+    return '【复习专题模式】<b>' + q + '</b> 的完整学习包：<br>定义 + 方法套路 + 易错原理 + 相关错题，共 ' + ids.size + ' 个节点全亮。<br>' +
+      '<span style="color:#94a3b8;font-size:11px">→ MOC + 全 subtype Flash + Error，系统性复习一个主题</span>';
+  }
+}
+
+function renderHits(mode, structOpt, allIds, reason) {
+  const action = ACTION_TARGET[mode];
+  const list = document.getElementById('hitsList');
+  document.getElementById('hitCount').textContent = allIds ? allIds.size : 0;
+
+  if (!allIds || allIds.size === 0) {
+    list.innerHTML = '<div style="color:#64748b;padding:4px 0">无命中</div>';
+    return;
+  }
+
+  // 收集命中节点 + 分类
+  const buckets = {};
+  afterData.nodes.forEach(n => {
+    if (allIds.has(n.id)) {
+      const r = reason.get(n.id) || 'semantic';
+      (buckets[r] = buckets[r] || []).push(n);
+    }
+  });
+
+  let html = '';
+  if (structOpt === 'off') {
+    // 纯 LightRAG：扁平列出，不分类（突出"没结构优化就是一坨"）
+    html += '<div style="color:#94a3b8;font-size:11px;margin-bottom:4px">▸ LightRAG 语义命中（不区分卡片类型）</div>';
+    (buckets['semantic'] || []).forEach(n => {
+      html += `<div class="hit-row">
+        <span class="hit-dot" style="background:#fbbf24;color:#fbbf24"></span>
+        <span class="hit-name">${n.name}</span>
+        <span style="color:#64748b;font-size:10px">[${n.type}${n.subtype ? '/' + n.subtype : ''}]</span>
+      </div>`;
+    });
+    list.innerHTML = html;
+    return;
+  }
+
+  // 结构优化：按 reason 分组，每组带颜色 + 说明
+  const order = ['moc-target', 'moc-context', 'flash-target', 'flash-method-sibling', 'flash-cause',
+                 'error-target', 'error-from-flash', 'error-sibling', 'review-all', 'semantic'];
+  order.forEach(r => {
+    if (!buckets[r]) return;
+    html += `<div style="margin-bottom:6px">
+      <div style="color:${REASON_RING[r]};font-size:11px;font-weight:600;margin-bottom:2px">■ ${REASON_LABEL[r]}（${buckets[r].length}）</div>`;
+    buckets[r].forEach(n => {
+      const subtypeTag = n.subtype ? `<span style="color:#64748b;font-size:10px">[${n.subtype}]</span>` : '';
+      html += `<div class="hit-row" style="padding:2px 0">
+        <span class="hit-dot" style="background:${REASON_RING[r]};color:${REASON_RING[r]}"></span>
+        <span style="color:#cbd5e1;font-size:11px">${n.name}</span>
+        ${subtypeTag}
+      </div>`;
+    });
+    html += '</div>';
+  });
+
+  list.innerHTML = html;
+}
+
+function renderLegend(elId) {
+  const items = elId === 'legendBefore' ? [
+    { c: COLORS[0], label: 'root (Lv0)' },
+    { c: COLORS[1], label: 'chapter (Lv1)' },
+    { c: COLORS[2], label: 'moc (Lv2)' },
+    { c: COLORS[3], label: 'flash (Lv3)' },
+    { c: COLORS[4], label: 'error (Lv4)' }
+  ] : [
+    { c: COLORS[0], label: 'root' },
+    { c: COLORS[1], label: 'chapter' },
+    { c: COLORS[2], label: 'moc' },
+    { c: COLORS[3], label: 'flash' },
+    { c: COLORS[4], label: 'error' },
+    { c: '#fbbf24', label: '★ LightRAG 命中' },
+    { c: '#4fd1c5', label: '★ 动作目标' },
+    { c: '#f472b6', label: '★ 错题/错因' },
+    { c: '#a78bfa', label: '★ 结构扩展' }
+  ];
+  document.getElementById(elId).innerHTML = items.map(i =>
+    `<div class="legend-item"><span class="legend-dot" style="background:${i.c}"></span>${i.label}</div>`
+  ).join('');
+}
+
+// 回车触发查询
+document.getElementById('q').addEventListener('keydown', e => {
+  if (e.key === 'Enter') runQuery();
+});
+
+// 初始化
+renderBefore();
+renderLegend('legendBefore');
+renderLegend('legendAfter');
+// 右侧初始展示：学概念 + 泰勒展开（让用户一进来就看到结构优化的差异）
+setTimeout(() => {
+  afterData = afterLayout(JSON.parse(JSON.stringify(TREE)));
+  runQuery();
+}, 100);
+</script>
+</body>
+</html>

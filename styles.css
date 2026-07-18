@@ -1,12 +1,48 @@
 /* 星环图谱视图样式 (G6 canvas) */
+/* 颜色全部走 CSS 变量,暗色为默认值,亮色在 body.theme-light 下覆盖。
+   JS 层(view.ts)通过 readThemeVar() 读这些变量,把值传给 G6 canvas(它不读 CSS)。 */
 
 .star-ring-view {
-  background: radial-gradient(circle at center, #1a1f2e 0%, #0d1117 100%);
-  color: #e6edf3;
+  /* 暗色(默认) */
+  --sr-bg-start: #1a1f2e;
+  --sr-bg-end: #0d1117;
+  --sr-text: #e6edf3;
+  --sr-label-fill: #e6edf3;
+  --sr-edge: #7aa8d4;
+  --sr-aux-edge: #9bb3d1;
+  --sr-minimap-bg: rgba(30, 30, 30, 0.8);
+  --sr-minimap-border: #444;
+  --sr-focus-text: #c9b8ff;
+  --sr-focus-bg: rgba(40, 30, 60, 0.85);
+  --sr-focus-border: #6b4fa8;
+  --sr-hover-shadow: #fff;
+  --sr-hover-edge: #a78bfa;
+  --sr-error-text: #e55;
+
+  background: radial-gradient(circle at center, var(--sr-bg-start) 0%, var(--sr-bg-end) 100%);
+  color: var(--sr-text);
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
   overflow: hidden;
   padding: 0;
   position: relative;
+}
+
+/* 亮色主题覆盖 */
+body.theme-light .star-ring-view {
+  --sr-bg-start: #f5f7fa;
+  --sr-bg-end: #e4e9f2;
+  --sr-text: #1f2937;
+  --sr-label-fill: #1f2937;
+  --sr-edge: #4a6b8a;
+  --sr-aux-edge: #6b7c92;
+  --sr-minimap-bg: rgba(255, 255, 255, 0.85);
+  --sr-minimap-border: #ccc;
+  --sr-focus-text: #6b4fa8;
+  --sr-focus-bg: rgba(245, 240, 255, 0.9);
+  --sr-focus-border: #a78bfa;
+  --sr-hover-shadow: #1f2937;
+  --sr-hover-edge: #6b4fa8;
+  --sr-error-text: #c00;
 }
 
 .star-ring-view .g6-container canvas {
@@ -18,8 +54,8 @@
   position: absolute;
   right: 12px;
   bottom: 12px;
-  background: rgba(30, 30, 30, 0.8);
-  border: 1px solid #444;
+  background: var(--sr-minimap-bg);
+  border: 1px solid var(--sr-minimap-border);
   border-radius: 6px;
 }
 
@@ -31,9 +67,9 @@
   right: 12px;
   padding: 4px 10px;
   font-size: 12px;
-  color: #c9b8ff;
-  background: rgba(40, 30, 60, 0.85);
-  border: 1px solid #6b4fa8;
+  color: var(--sr-focus-text);
+  background: var(--sr-focus-bg);
+  border: 1px solid var(--sr-focus-border);
   border-radius: 6px;
   pointer-events: none;
   z-index: 5;

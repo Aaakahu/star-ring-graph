@@ -1,0 +1,949 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>星环图谱高保真预览 + 查询弹窗</title>
+<style>
+  /* ============ Astryx 主题 tokens（双主题：dark=Gothic, light=Neutral）============ */
+  /* Dark: Gothic（dark-only 原值）｜Light: Neutral light 侧 */
+  :root,
+  [data-theme="dark"] {
+    /* Surface (Gothic) */
+    --ast-bg-body: #101314;
+    --ast-bg-surface: #101314;
+    --ast-bg-card: #1a1d20;
+    --ast-bg-popover: #24292D;
+    --ast-bg-muted: #24292D;
+    /* Accent / Text (Gothic) */
+    --ast-accent: #E8F1F6;
+    --ast-accent-muted: rgba(232, 241, 246, 0.125);
+    --ast-neutral: rgba(232, 241, 246, 0.10);
+    --ast-text-primary: #E8F1F6;
+    --ast-text-secondary: #96A0AB;
+    --ast-text-disabled: #495056;
+    --ast-on-accent: #101314;
+    /* Border (Gothic) */
+    --ast-border: rgba(232, 241, 246, 0.10);
+    --ast-border-emphasized: #495056;
+    /* Overlay */
+    --ast-overlay-hover: rgba(232, 241, 246, 0.05);
+    --ast-overlay-pressed: rgba(232, 241, 246, 0.10);
+    /* 分类色 chip（Gothic dusty pastel）*/
+    --ast-bg-teal: #a3c2b6;   --ast-text-teal: #174a40;
+    --ast-bg-blue: #a3b5d6;   --ast-text-blue: #1f2c54;
+    --ast-bg-purple: #b29bc4; --ast-text-purple: #481b58;
+    --ast-bg-pink: #c89aab;   --ast-text-pink: #71223c;
+    /* 星环背景渐变 */
+    --sr-bg-start: #1a1f2e;
+    --sr-bg-end: #0d1117;
+    --sr-edge: rgba(122, 168, 212, 0.55);
+    --ast-shadow-high: 0 4px 6px rgba(0,0,0,0.25), 0 12px 24px rgba(0,0,0,0.30);
+  }
+
+  [data-theme="light"] {
+    /* Surface (Neutral light) */
+    --ast-bg-body: #fafafa;
+    --ast-bg-surface: #ffffff;
+    --ast-bg-card: #ffffff;
+    --ast-bg-popover: #ffffff;
+    --ast-bg-muted: #f5f5f5;
+    /* Accent / Text (Neutral light) */
+    --ast-accent: #171717;
+    --ast-accent-muted: rgba(23, 23, 23, 0.08);
+    --ast-neutral: rgba(23, 23, 23, 0.05);
+    --ast-text-primary: #1a1a1a;
+    --ast-text-secondary: #737373;
+    --ast-text-disabled: #d4d4d4;
+    --ast-on-accent: #fafafa;
+    /* Border (Neutral light) */
+    --ast-border: rgba(23, 23, 23, 0.10);
+    --ast-border-emphasized: #e5e5e5;
+    /* Overlay */
+    --ast-overlay-hover: rgba(23, 23, 23, 0.05);
+    --ast-overlay-pressed: rgba(23, 23, 23, 0.10);
+    /* 分类色 chip（Neutral light：浅底深字，对比够）*/
+    --ast-bg-teal: #ccfbf1;   --ast-text-teal: #115e59;
+    --ast-bg-blue: #dbeafe;   --ast-text-blue: #1e40af;
+    --ast-bg-purple: #ede9fe; --ast-text-purple: #5b21b6;
+    --ast-bg-pink: #fce7f3;   --ast-text-pink: #9d174d;
+    /* 星环背景渐变（浅色：柔和米白）*/
+    --sr-bg-start: #f5f7fa;
+    --sr-bg-end: #e4e9f2;
+    --sr-edge: rgba(74, 107, 138, 0.45);
+    --ast-shadow-high: 0 4px 6px rgba(0,0,0,0.07), 0 12px 24px rgba(0,0,0,0.10);
+  }
+
+  :root {
+    /* Radius（两主题共用）*/
+    --ast-r-element: 8px;
+    --ast-r-container: 12px;
+    --ast-r-full: 9999px;
+    /* Motion（Gothic 覆盖：fast=150ms, medium=350ms）*/
+    --ast-ease: cubic-bezier(0.24, 1, 0.4, 1);
+    --ast-dur-fast: 150ms;
+    --ast-dur-med: 350ms;
+    /* Typography */
+    --ast-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", Roboto, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--ast-bg-body);
+    color: var(--ast-text-primary);
+    font-family: var(--ast-font);
+    overflow: hidden;
+    font-size: 14px;
+  }
+
+  /* ============ 视图容器 ============ */
+  .star-ring-view {
+    background: radial-gradient(circle at center, var(--sr-bg-start) 0%, var(--sr-bg-end) 100%);
+    color: var(--ast-text-primary);
+    overflow: hidden;
+    position: relative;
+    width: 100vw; height: 100vh;
+    transition: background var(--ast-dur-med) var(--ast-ease);
+  }
+
+  .g6-container { width: 100%; height: 100%; position: relative; }
+  .g6-container canvas { background: transparent !important; }
+
+  /* 小地图 */
+  .star-ring-minimap {
+    position: absolute;
+    right: 12px; bottom: 12px;
+    background: var(--ast-bg-muted);
+    border: 1px solid var(--ast-border);
+    border-radius: var(--ast-r-container);
+    width: 150px; height: 100px;
+    overflow: hidden;
+    box-shadow: var(--ast-shadow-high);
+  }
+
+  /* 聚焦模式提示 */
+  .star-ring-view.is-focused .g6-container::after {
+    content: "聚焦模式 · 点空白或 Esc 退出";
+    position: absolute; top: 12px; right: 12px;
+    padding: 2px 12px; font-size: 12px; line-height: 1.6667; font-weight: 500;
+    color: var(--ast-text-primary);
+    background: var(--ast-accent-muted);
+    border-radius: var(--ast-r-full);
+    pointer-events: none; z-index: 5;
+  }
+
+  /* ============ SVG icon（inline，currentColor 适配主题）============ */
+  .icon-svg {
+    width: 16px; height: 16px; flex-shrink: 0;
+    stroke: currentColor; fill: none;
+    stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+  }
+  .icon-svg.sm { width: 14px; height: 14px; }
+
+  /* ============ 查询浮层 ============ */
+  .query-fab {
+    position: absolute;
+    top: 16px; left: 16px;
+    z-index: 10;
+    background: var(--ast-bg-popover);
+    border: 1px solid var(--ast-border);
+    border-radius: var(--ast-r-container);
+    box-shadow: var(--ast-shadow-high);
+    padding: 12px;
+    width: 400px;
+    transition: width var(--ast-dur-fast) var(--ast-ease),
+                padding var(--ast-dur-fast) var(--ast-ease),
+                background var(--ast-dur-med) var(--ast-ease),
+                border-color var(--ast-dur-med) var(--ast-ease);
+  }
+  .query-fab.collapsed { width: auto; padding: 4px; }
+  .query-fab.collapsed .query-body { display: none; }
+
+  .query-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px;
+    border-radius: var(--ast-r-element);
+    cursor: pointer;
+    user-select: none;
+    color: var(--ast-text-primary);
+    transition: background-color 112ms var(--ast-ease);
+  }
+  .query-header:hover { background: var(--ast-overlay-hover); }
+  .query-header .title {
+    font-size: 14px; font-weight: 500; flex: 1;
+  }
+  .query-header .toggle {
+    font-size: 12px; color: var(--ast-text-secondary); line-height: 1.6667;
+  }
+
+  .query-body { display: flex; flex-direction: column; gap: 8px; padding: 4px; }
+
+  /* Input row */
+  .query-row { display: flex; gap: 8px; align-items: stretch; }
+  .query-input-wrap {
+    flex: 1; display: flex; align-items: center; gap: 8px;
+    padding: 4px 8px;
+    border: 1px solid var(--ast-border-emphasized);
+    border-radius: var(--ast-r-element);
+    background: var(--ast-bg-surface);
+    color: var(--ast-text-secondary);
+    transition: border-color var(--ast-dur-fast) var(--ast-ease),
+                box-shadow var(--ast-dur-fast) var(--ast-ease);
+  }
+  .query-input-wrap:focus-within {
+    border-color: var(--ast-accent);
+    box-shadow: inset 0 0 0 2px var(--ast-accent-muted);
+    color: var(--ast-text-primary);
+  }
+  .query-input-wrap:hover:not(:focus-within) {
+    box-shadow: inset 0 0 0 2px var(--ast-border);
+  }
+  .query-input-wrap input {
+    flex: 1; border: none; background: transparent; outline: none;
+    color: var(--ast-text-primary); font-size: 14px; line-height: 1.4286;
+    font-family: var(--ast-font); padding: 2px 0; min-width: 0;
+  }
+  .query-input-wrap input::placeholder { color: var(--ast-text-secondary); }
+
+  /* Select */
+  .query-select {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: auto; padding: 6px 10px;
+    border: none; border-radius: var(--ast-r-element);
+    background: var(--ast-neutral);
+    color: var(--ast-text-primary);
+    font-family: var(--ast-font); font-size: 12px; line-height: 1.6667; font-weight: 500;
+    cursor: pointer;
+    transition: background-color var(--ast-dur-fast) var(--ast-ease);
+  }
+  .query-select:hover { background: var(--ast-overlay-hover); }
+  .query-select option { background: var(--ast-bg-popover); color: var(--ast-text-primary); }
+
+  /* Button primary */
+  .query-btn {
+    position: relative;
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 6px 14px;
+    border: none; border-radius: var(--ast-r-element);
+    background-color: var(--ast-accent);
+    color: var(--ast-on-accent);
+    font-family: var(--ast-font); font-size: 13px; line-height: 1.4286; font-weight: 500;
+    white-space: nowrap; cursor: pointer;
+    transition: background-image var(--ast-dur-fast) var(--ast-ease),
+                transform var(--ast-dur-fast) var(--ast-ease);
+  }
+  .query-btn:hover { background-image: linear-gradient(var(--ast-overlay-hover), var(--ast-overlay-hover)); }
+  .query-btn:active { transform: scale(0.98); background-image: linear-gradient(var(--ast-overlay-pressed), var(--ast-overlay-pressed)); }
+  .query-btn .icon-svg { stroke: var(--ast-on-accent); }
+
+  /* Answer box */
+  .answer-box {
+    background: var(--ast-bg-muted);
+    border-radius: var(--ast-r-element);
+    padding: 8px 12px;
+    font-size: 13px; line-height: 1.5385; color: var(--ast-text-primary);
+    max-height: 140px; overflow-y: auto;
+  }
+  .answer-box::-webkit-scrollbar { width: 6px; }
+  .answer-box::-webkit-scrollbar-thumb { background: var(--ast-border-emphasized); border-radius: 3px; }
+  .ans-label {
+    font-size: 12px; line-height: 1.6667; color: var(--ast-text-secondary);
+    margin-bottom: 4px; font-weight: 500;
+  }
+  .ans-loading { color: var(--ast-text-secondary); font-style: italic; }
+
+  /* Chip row */
+  .hits-summary {
+    display: flex; gap: 6px; padding: 4px 0; flex-wrap: wrap; align-items: center;
+  }
+  .chip {
+    display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+    height: 20px; padding: 0 8px;
+    border-radius: var(--ast-r-full);
+    font-size: 12px; line-height: 1.6667; font-weight: 500;
+    white-space: nowrap;
+  }
+  .chip-moc   { background: var(--ast-bg-teal);   color: var(--ast-text-teal); }
+  .chip-flash { background: var(--ast-bg-blue);   color: var(--ast-text-blue); }
+  .chip-error { background: var(--ast-bg-pink);   color: var(--ast-text-pink); }
+
+  /* ============ 自定义下拉（Astryx DropdownMenu + Item）============ */
+  .dropdown { position: relative; display: inline-block; }
+  .dropdown-trigger {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 10px;
+    border: none; border-radius: var(--ast-r-element);
+    background: var(--ast-neutral);
+    color: var(--ast-text-primary);
+    font-family: var(--ast-font); font-size: 12px; line-height: 1.6667; font-weight: 500;
+    cursor: pointer;
+    transition: background-color var(--ast-dur-fast) var(--ast-ease);
+  }
+  .dropdown-trigger:hover { background: var(--ast-overlay-hover); }
+  .dropdown-trigger .chevron {
+    transition: transform var(--ast-dur-fast) var(--ast-ease);
+    color: var(--ast-text-secondary);
+  }
+  .dropdown.open .dropdown-trigger .chevron { transform: rotate(180deg); }
+
+  .dropdown-menu {
+    position: absolute; top: calc(100% + 4px); left: 0;
+    min-width: 180px;
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 4px;
+    background: var(--ast-bg-popover);
+    border: 1px solid var(--ast-border);
+    border-radius: var(--ast-r-container);
+    box-shadow: var(--ast-shadow-high);
+    z-index: 20;
+    opacity: 0; pointer-events: none;
+    transform: translateY(-4px);
+    transition: opacity var(--ast-dur-fast) var(--ast-ease),
+                transform var(--ast-dur-fast) var(--ast-ease);
+  }
+  .dropdown.open .dropdown-menu { opacity: 1; pointer-events: auto; transform: translateY(0); }
+
+  .dropdown-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px;
+    border-radius: var(--ast-r-element);
+    cursor: pointer;
+    color: var(--ast-text-primary);
+    transition: background-color 112ms var(--ast-ease);
+  }
+  .dropdown-item:hover { background: var(--ast-overlay-hover); }
+  .dropdown-item.selected { background: var(--ast-accent-muted); }
+  .dropdown-item .item-label { flex: 1; font-size: 14px; line-height: 1.4286; }
+  .dropdown-item .item-desc { font-size: 12px; line-height: 1.6667; color: var(--ast-text-secondary); }
+  .dropdown-item .item-check {
+    width: 16px; height: 16px; color: var(--ast-accent);
+    opacity: 0; flex-shrink: 0;
+  }
+  .dropdown-item.selected .item-check { opacity: 1; }
+
+  /* ============ 节点状态样式 ============ */
+  .node-active { animation: sr-pulse 1.6s ease-in-out infinite; }
+  @keyframes sr-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; filter: brightness(1.4); }
+  }
+  .node-inactive { opacity: 0.08; transition: opacity var(--ast-dur-med) var(--ast-ease); }
+  .edge-active { stroke: var(--ast-accent) !important; stroke-width: 2 !important; opacity: 1 !important; }
+  .edge-inactive { opacity: 0.02 !important; }
+
+  /* SVG canvas */
+  #starCanvas { width: 100%; height: 100%; display: block; cursor: grab; }
+  #starCanvas:active { cursor: grabbing; }
+
+  /* 底部提示 */
+  .hint-bar {
+    position: absolute; bottom: 12px; left: 16px;
+    font-size: 12px; line-height: 1.6667; color: var(--ast-text-secondary);
+    background: var(--ast-bg-muted);
+    border: 1px solid var(--ast-border);
+    padding: 4px 12px; border-radius: var(--ast-r-element);
+    z-index: 5;
+  }
+  .hint-bar code {
+    color: var(--ast-text-primary);
+    background: var(--ast-neutral);
+    padding: 1px 6px; border-radius: 4px;
+    font-family: "SF Mono", Monaco, Consolas, monospace; font-size: 11px;
+  }
+
+  /* ============ 主题切换按钮（右上角，测试用）============ */
+  .theme-toggle {
+    position: absolute; top: 16px; right: 16px;
+    z-index: 10;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 36px; height: 36px;
+    border: 1px solid var(--ast-border);
+    border-radius: var(--ast-r-element);
+    background: var(--ast-bg-popover);
+    color: var(--ast-text-primary);
+    cursor: pointer;
+    box-shadow: var(--ast-shadow-high);
+    transition: background-color var(--ast-dur-fast) var(--ast-ease);
+  }
+  .theme-toggle:hover { background: var(--ast-overlay-hover); }
+  [data-theme="dark"] .icon-sun { display: block; }
+  [data-theme="dark"] .icon-moon { display: none; }
+  [data-theme="light"] .icon-sun { display: none; }
+  [data-theme="light"] .icon-moon { display: block; }
+</style>
+</head>
+<body>
+<div class="star-ring-view" id="view">
+  <div class="g6-container">
+    <svg id="starCanvas" viewBox="-400 -350 800 700"></svg>
+
+    <!-- 小地图（mock） -->
+    <div class="star-ring-minimap">
+      <svg width="150" height="100" viewBox="-400 -350 800 700" id="minimapSvg"></svg>
+    </div>
+
+    <!-- ============ 主题切换（右上角）============ -->
+    <button class="theme-toggle" onclick="toggleTheme()" title="切换主题">
+      <svg class="icon-svg icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+      <svg class="icon-svg icon-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
+
+    <!-- ============ 查询浮层 ============ -->
+    <div class="query-fab" id="queryFab">
+      <div class="query-header" onclick="toggleFab()">
+        <svg class="icon-svg" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <span class="title">知识库查询</span>
+        <span class="toggle" id="toggleText">收起</span>
+      </div>
+      <div class="query-body">
+        <div class="query-row">
+          <div class="query-input-wrap">
+            <svg class="icon-svg sm" viewBox="0 0 24 24" style="color:var(--ast-text-secondary)"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            <input type="text" id="q" value="泰勒展开" placeholder="输入知识点 / 套路 / 错题关键词…">
+          </div>
+          <div class="dropdown" id="modeDropdown">
+            <button class="dropdown-trigger" onclick="toggleDropdown('modeDropdown')" type="button">
+              <span id="modeLabel">学概念</span>
+              <svg class="icon-svg sm chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+            <div class="dropdown-menu">
+              <div class="dropdown-item selected" data-value="concept" onclick="selectMode('concept', '学概念', 'MOC + 是什么型 Flash')">
+                <span class="item-label">学概念</span>
+                <span class="item-desc">MOC + 是什么</span>
+                <svg class="icon-svg sm item-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>
+              </div>
+              <div class="dropdown-item" data-value="method" onclick="selectMode('method', '找方法', '怎么做型 Flash（套路/方法）')">
+                <span class="item-label">找方法</span>
+                <span class="item-desc">怎么做 Flash</span>
+                <svg class="icon-svg sm item-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>
+              </div>
+              <div class="dropdown-item" data-value="error" onclick="selectMode('error', '查错题', 'Error 卡 + 暴露的套路盲点')">
+                <span class="item-label">查错题</span>
+                <span class="item-desc">错题 + 错因</span>
+                <svg class="icon-svg sm item-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>
+              </div>
+              <div class="dropdown-item" data-value="review" onclick="selectMode('review', '复习专题', 'MOC + 全 Flash + Error')">
+                <span class="item-label">复习专题</span>
+                <span class="item-desc">全套</span>
+                <svg class="icon-svg sm item-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>
+              </div>
+            </div>
+          </div>
+          <button class="query-btn" onclick="runQuery()">
+            <svg class="icon-svg sm" viewBox="0 0 24 24"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+            查询
+          </button>
+        </div>
+        <div class="answer-box" id="answer">
+          <div class="ans-label">GLM-5.2 回答</div>
+          <div id="ansBody">输入问题，选择学习动作，查询你的三层卡片知识库。</div>
+        </div>
+        <div class="hits-summary" id="hitsSummary" style="display:none">
+          <span class="chip chip-moc" id="chipMoc">MOC 0</span>
+          <span class="chip chip-flash" id="chipFlash">Flash 0</span>
+          <span class="chip chip-error" id="chipError">Error 0</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="hint-bar">
+      拖动画布 ｜ 滚轮缩放 ｜ 点节点高亮链路 ｜ <code>Alt+点 MOC</code> 进聚焦
+    </div>
+  </div>
+</div>
+
+<script>
+// ============ 数据（mock，对齐你 vault 的真实卡片结构）============
+const TREE = {
+  name: "极限与无穷小", type: "root", level: 0, children: [
+    { name: "数列极限", type: "chapter", level: 1, children: [
+      { name: "数列极限定义", type: "moc", level: 2, _hasCloud: true, children: [
+        { name: "ε-N定义精解", type: "Flash", subtype: "know_what", level: 3, children: [] },
+        { name: "ε-N放缩套路", type: "Flash", subtype: "know_how", level: 3, children: [] },
+        { name: "唯一性反例速记", type: "Flash", subtype: "know_why", level: 3, children: [] }
+      ]},
+      { name: "收敛准则", type: "moc", level: 2, _hasCloud: true, children: [
+        { name: "夹逼放缩技巧", type: "Flash", subtype: "know_how", level: 3, children: [
+          { name: "1992数二(夹逼)", type: "Error", level: 4 }
+        ]},
+        { name: "单调有界建数列法", type: "Flash", subtype: "know_how", level: 3, children: [
+          { name: "错题(单调有界)", type: "Error", level: 4 }
+        ]},
+        { name: "子列反例速查", type: "Flash", subtype: "know_why", level: 3, children: [] }
+      ]}
+    ]},
+    { name: "函数极限", type: "chapter", level: 1, children: [
+      { name: "函数极限定义", type: "moc", level: 2, _hasCloud: true, children: [
+        { name: "ε-δ定义精解", type: "Flash", subtype: "know_what", level: 3, children: [] },
+        { name: "左右极限求法", type: "Flash", subtype: "know_how", level: 3, children: [] },
+        { name: "几何意义速记", type: "Flash", subtype: "know_what", level: 3, children: [] }
+      ]},
+      { name: "极限计算工具", type: "moc", level: 2, _hasCloud: true, children: [
+        { name: "泰勒展开套路", type: "Flash", subtype: "know_how", level: 3, children: [
+          { name: "1991数二(泰勒)", type: "Error", level: 4 },
+          { name: "1992数二(泰勒)", type: "Error", level: 4 }
+        ]},
+        { name: "等价无穷小代换", type: "Flash", subtype: "know_how", level: 3, children: [
+          { name: "1988数一二(代换)", type: "Error", level: 4 }
+        ]},
+        { name: "加减滥用等价无穷小", type: "Flash", subtype: "know_why", level: 3, children: [] },
+        { name: "洛必达使用时机", type: "Flash", subtype: "know_why", level: 3, children: [] }
+      ]},
+      { name: "极限性质", type: "moc", level: 2, _hasCloud: true, children: [
+        { name: "局部有界结论", type: "Flash", subtype: "know_what", level: 3, children: [] },
+        { name: "保号性做题技巧", type: "Flash", subtype: "know_how", level: 3, children: [] },
+        { name: "海涅定理桥接法", type: "Flash", subtype: "know_why", level: 3, children: [
+          { name: "错题(海涅)", type: "Error", level: 4 }
+        ]}
+      ]}
+    ]},
+    { name: "无穷小", type: "chapter", level: 1, children: [
+      { name: "无穷小比较", type: "moc", level: 2, _hasCloud: true, children: [
+        { name: "等价无穷小替换表", type: "Flash", subtype: "know_what", level: 3, children: [] },
+        { name: "同阶比较速记", type: "Flash", subtype: "know_how", level: 3, children: [] },
+        { name: "高阶记号记忆", type: "Flash", subtype: "know_what", level: 3, children: [] }
+      ]},
+      { name: "等价代换", type: "moc", level: 2, _hasCloud: false, children: [
+        { name: "tanx~x代换", type: "Flash", subtype: "know_how", level: 3, children: [] },
+        { name: "ln(1+x)~x代换", type: "Flash", subtype: "know_how", level: 3, children: [] }
+      ]}
+    ]}
+  ]
+};
+
+// 颜色 / 尺寸 / 字号（对齐 data.ts convertToG6Data 的 levelColorMap + levelConfig）
+const COLORS = {
+  0: { fill: '#f0a94f', stroke: '#c4883f', shadowBlur: 12 },  // root 橙
+  1: { fill: '#4f8ff7', stroke: '#3d7bd4', shadowBlur: 8 },   // chapter 蓝
+  2: { fill: '#4fd1c5', stroke: '#3db8ad', shadowBlur: 10 },  // moc 青
+  3: { fill: '#e06c75', stroke: '#c4555e', shadowBlur: 0 },   // flash 暗红
+  4: { fill: '#c678dd', stroke: '#a35bb8', shadowBlur: 0 }    // error 粉紫
+};
+const SIZES = [32, 22, 14, 9, 7];   // levelConfig.size
+const FONTS = [13, 10, 9, 8, 7];    // levelConfig.font（level>2 收一档）
+
+// ============ 布局：真旭日图（对齐 starRingSectorLayout）============
+function flatten(root) {
+  const nodes = [], edges = [];
+  const walk = (n, parent) => {
+    n.x = 0; n.y = 0; n.sw = 0; n.id = nodes.length;
+    nodes.push(n);
+    if (parent) edges.push({ s: parent, t: n });
+    (n.children||[]).forEach(c => walk(c, n));
+  };
+  walk(root, null);
+  return { nodes, edges };
+}
+
+function starRingLayout(root, baseR = 95, levelGap = 75) {
+  const { nodes, edges } = flatten(root);
+  const childrenOf = new Map();
+  edges.forEach(e => {
+    if (!childrenOf.has(e.s.id)) childrenOf.set(e.s.id, []);
+    childrenOf.get(e.s.id).push(e.t);
+  });
+  const GAP = 0.05, MIN_SPAN = 0.5;
+  const layoutRadial = (n) => {
+    const kids = childrenOf.get(n.id) || [];
+    if (kids.length === 0) { n.sw = MIN_SPAN; return; }
+    let total = 0;
+    kids.forEach(k => { layoutRadial(k); total += k.sw; });
+    total += GAP * (kids.length - 1);
+    n.sw = total;
+  };
+  layoutRadial(root);
+  const depthRadius = d => d === 0 ? 0 : baseR + d * levelGap;
+  const positionRadial = (n, a0, a1, depth) => {
+    const r = depthRadius(depth);
+    const mid = (a0 + a1) / 2;
+    n._midAngle = mid;
+    n.x = Math.cos(mid) * r;
+    n.y = Math.sin(mid) * r;
+    const kids = childrenOf.get(n.id) || [];
+    if (kids.length === 0) return;
+    const sector = a1 - a0;
+    const totalW = Math.max(n.sw, 0.01);
+    let cursor = a0;
+    kids.forEach(k => {
+      const span = (k.sw / totalW) * sector;
+      positionRadial(k, cursor, cursor + span, depth + 1);
+      cursor += span;
+    });
+  };
+  positionRadial(root, -Math.PI / 2, Math.PI * 1.5, 0);
+  return { nodes, edges };
+}
+
+let renderData = starRingLayout(TREE);
+
+// ============ 渲染 ============
+const NS = 'http://www.w3.org/2000/svg';
+const EDGE_COLOR = '#7aa8d4';   // --sr-edge
+const AUX_EDGE_COLOR = '#9bb3d1';
+
+// 记录当前高亮状态，主题切换时重渲染用（在 render 之前声明，避免 TDZ）
+let currentActive = null, currentReason = null;
+
+function render(activeIds, reason) {
+  // 记录当前高亮状态，主题切换时重渲染用
+  currentActive = activeIds; currentReason = reason;
+  const svg = document.getElementById('starCanvas');
+  svg.innerHTML = '';
+
+  // 读主题色（每次 render 重读，主题切换后自动用新色）
+  const cs = getComputedStyle(document.documentElement);
+  const labelFill = cs.getPropertyValue('--ast-text-primary').trim() || '#E8F1F6';
+  const edgeColor = cs.getPropertyValue('--sr-edge').trim() || 'rgba(122,168,212,0.55)';
+  const ringGuide = cs.getPropertyValue('--ast-border').trim() || 'rgba(232,241,246,0.10)';
+
+  // 引导环（星环视觉标志，等差环间距）
+  [95, 170, 245, 320].forEach(r => {
+    const c = document.createElementNS(NS, 'circle');
+    c.setAttribute('cx', 0); c.setAttribute('cy', 0); c.setAttribute('r', r);
+    c.setAttribute('fill', 'none'); c.setAttribute('stroke', ringGuide);
+    c.setAttribute('stroke-width', '0.5');
+    svg.appendChild(c);
+  });
+
+  // 边
+  renderData.edges.forEach(e => {
+    const line = document.createElementNS(NS, 'line');
+    line.setAttribute('x1', e.s.x); line.setAttribute('y1', e.s.y);
+    line.setAttribute('x2', e.t.x); line.setAttribute('y2', e.t.y);
+    line.setAttribute('stroke', edgeColor);
+    line.setAttribute('stroke-width', '1.5');
+    line.setAttribute('opacity', '0.85');
+    if (activeIds && activeIds.size > 0) {
+      const both = activeIds.has(e.s.id) && activeIds.has(e.t.id);
+      if (both) line.classList.add('edge-active');
+      else line.classList.add('edge-inactive');
+    }
+    svg.appendChild(line);
+  });
+
+  // 节点
+  renderData.nodes.forEach(n => {
+    const lvl = n.level;
+    const color = COLORS[lvl];
+    const size = SIZES[Math.min(lvl, 4)];
+    const g = document.createElementNS(NS, 'g');
+    g.setAttribute('transform', `translate(${n.x},${n.y})`);
+    g.style.cursor = 'pointer';
+    g.dataset.nodeId = n.id;
+
+    // MOC halo
+    if (lvl === 2 && n._hasCloud) {
+      const halo = document.createElementNS(NS, 'circle');
+      halo.setAttribute('cx', 0); halo.setAttribute('cy', 0);
+      halo.setAttribute('r', size / 2 + 10);
+      halo.setAttribute('fill', color.fill);
+      halo.setAttribute('opacity', '0.35');
+      g.appendChild(halo);
+    }
+
+    // 主圆
+    const c = document.createElementNS(NS, 'circle');
+    c.setAttribute('cx', 0); c.setAttribute('cy', 0); c.setAttribute('r', size / 2);
+    c.setAttribute('fill', color.fill); c.setAttribute('stroke', color.stroke);
+    c.setAttribute('stroke-width', lvl <= 1 ? 2 : 1);
+    if (activeIds && activeIds.size > 0) {
+      if (activeIds.has(n.id)) {
+        c.classList.add('node-active');
+        const ring = (reason && reason.get(n.id)) || 'semantic';
+        c.style.filter = `drop-shadow(0 0 8px ${REASON_RING[ring] || color.fill})`;
+      } else {
+        c.classList.add('node-inactive');
+      }
+    } else {
+      if (lvl === 0 || lvl === 1 || (lvl === 2 && n._hasCloud)) {
+        c.style.filter = `drop-shadow(0 0 ${color.shadowBlur}px ${color.fill})`;
+      }
+    }
+    g.appendChild(c);
+
+    // 标签
+    const t = document.createElementNS(NS, 'text');
+    t.setAttribute('x', 0);
+    t.setAttribute('y', size / 2 + Math.max(8, FONTS[lvl] + 2));
+    t.setAttribute('text-anchor', 'middle');
+    t.setAttribute('fill', activeIds && activeIds.has(n.id)
+      ? (REASON_RING[(reason && reason.get(n.id)) || 'semantic'] || labelFill)
+      : labelFill);
+    t.setAttribute('font-size', FONTS[lvl]);
+    t.setAttribute('font-family', 'system-ui, -apple-system, sans-serif');
+    t.setAttribute('opacity', (activeIds && activeIds.size > 0 && !activeIds.has(n.id)) ? '0.1' : (lvl >= 3 ? '0.85' : '1'));
+    t.textContent = n.name;
+    g.appendChild(t);
+
+    g.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      highlightChain(n.id);
+    });
+
+    svg.appendChild(g);
+  });
+
+  renderMinimap();
+}
+
+function renderMinimap() {
+  const m = document.getElementById('minimapSvg');
+  m.innerHTML = '';
+  renderData.edges.forEach(e => {
+    const line = document.createElementNS(NS, 'line');
+    line.setAttribute('x1', e.s.x/4); line.setAttribute('y1', e.s.y/4);
+    line.setAttribute('x2', e.t.x/4); line.setAttribute('y2', e.t.y/4);
+    line.setAttribute('stroke', '#4a5568'); line.setAttribute('stroke-width', '2');
+    m.appendChild(line);
+  });
+  renderData.nodes.forEach(n => {
+    const c = document.createElementNS(NS, 'circle');
+    c.setAttribute('cx', n.x/4); c.setAttribute('cy', n.y/4);
+    c.setAttribute('r', SIZES[n.level]/4);
+    c.setAttribute('fill', COLORS[n.level].fill);
+    m.appendChild(c);
+  });
+}
+
+// ============ 链路高亮（对齐 view.ts ancestorChain + descendantSet）============
+function highlightChain(nodeId) {
+  const parentOf = new Map();
+  const childrenOf = new Map();
+  renderData.edges.forEach(e => {
+    parentOf.set(e.t.id, e.s.id);
+    if (!childrenOf.has(e.s.id)) childrenOf.set(e.s.id, []);
+    childrenOf.get(e.s.id).push(e.t.id);
+  });
+  const active = new Set([nodeId]);
+  // 祖先链
+  let cur = parentOf.get(nodeId);
+  while (cur !== undefined) { active.add(cur); cur = parentOf.get(cur); }
+  // 后代 BFS
+  const q = [...(childrenOf.get(nodeId) || [])];
+  while (q.length) {
+    const c = q.shift();
+    if (active.has(c)) continue;
+    active.add(c);
+    (childrenOf.get(c) || []).forEach(k => q.push(k));
+  }
+  const reason = new Map();
+  active.forEach(id => reason.set(id, 'semantic'));
+  render(active, reason);
+}
+
+// 点击空白清除高亮
+document.getElementById('starCanvas').addEventListener('click', () => {
+  render(null, null);
+});
+
+// ============ 查询逻辑（4 动作，对齐 lightrag-compare.html）============
+const ACTION_TARGET = {
+  concept: { moc: true, flashSubtypes: ['know_what'], error: false, label: '📖 学概念' },
+  method:  { moc: false, flashSubtypes: ['know_how'], error: false, label: '🛠 找方法' },
+  error:   { moc: false, flashSubtypes: ['know_why'], error: true, label: '⚠ 查错题' },
+  review:  { moc: true, flashSubtypes: ['know_what','know_how','know_why'], error: true, label: '📚 复习专题' }
+};
+
+const REASON_RING = {
+  'semantic': '#fbbf24', 'moc-target': '#4fd1c5', 'flash-target': '#4fd1c5',
+  'error-target': '#f472b6', 'moc-context': '#7dd3fc', 'flash-method-sibling': '#a78bfa',
+  'flash-cause': '#fbbf24', 'error-from-flash': '#f472b6', 'error-sibling': '#c084fc', 'review-all': '#94a3b8'
+};
+
+const MOCK_SEMANTIC = {
+  "泰勒展开": ["泰勒展开套路", "加减滥用等价无穷小", "1991数二(泰勒)", "1992数二(泰勒)"],
+  "极限怎么求": ["ε-N放缩套路", "夹逼放缩技巧", "单调有界建数列法", "泰勒展开套路", "等价无穷小代换"],
+  "等价无穷小": ["等价无穷小代换", "加减滥用等价无穷小", "等价无穷小替换表", "1988数一二(代换)"],
+  "数列极限": ["ε-N定义精解", "ε-N放缩套路", "夹逼放缩技巧", "单调有界建数列法"],
+  "我哪里老错": ["1991数二(泰勒)", "1992数二(泰勒)", "1988数一二(代换)", "1992数二(夹逼)"]
+};
+
+function findHits(q) {
+  if (MOCK_SEMANTIC[q]) return MOCK_SEMANTIC[q];
+  for (const k of Object.keys(MOCK_SEMANTIC)) {
+    if (k.includes(q) || q.includes(k)) return MOCK_SEMANTIC[k];
+  }
+  return renderData.nodes.filter(n => n.name.includes(q)).map(n => n.name);
+}
+
+function runQuery() {
+  const q = document.getElementById('q').value.trim();
+  const mode = currentMode;
+  const action = ACTION_TARGET[mode];
+  const ansBox = document.getElementById('ansBody');
+  document.getElementById('hitsSummary').style.display = 'flex';
+
+  ansBox.innerHTML = '<span class="ans-loading">⟳ ' + action.label + ' 检索中… GLM-5.2 生成答案</span>';
+
+  setTimeout(() => {
+    const hitNames = findHits(q);
+    const nameToId = new Map();
+    renderData.nodes.forEach(n => nameToId.set(n.name, n.id));
+    const semanticIds = new Set();
+    hitNames.forEach(n => { if (nameToId.has(n)) semanticIds.add(nameToId.get(n)); });
+
+    const reason = new Map();
+    const finalIds = new Set();
+    const nodeById = new Map();
+    renderData.nodes.forEach(n => nodeById.set(n.id, n));
+    const parentOf = new Map();
+    const childrenOf = new Map();
+    renderData.edges.forEach(e => {
+      parentOf.set(e.t.id, e.s.id);
+      if (!childrenOf.has(e.s.id)) childrenOf.set(e.s.id, []);
+      childrenOf.get(e.s.id).push(e.t.id);
+    });
+
+    // 按动作筛选 + 结构扩展
+    semanticIds.forEach(id => {
+      const node = nodeById.get(id);
+      if (!node) return;
+      if (node.type === 'moc' && action.moc) { finalIds.add(id); reason.set(id, 'moc-target'); }
+      else if (node.type === 'Flash' && action.flashSubtypes.includes(node.subtype)) { finalIds.add(id); reason.set(id, 'flash-target'); }
+      else if (node.type === 'Error' && action.error) { finalIds.add(id); reason.set(id, 'error-target'); }
+    });
+
+    semanticIds.forEach(id => {
+      const node = nodeById.get(id);
+      if (!node) return;
+      const climbMOC = (n) => {
+        let cur = parentOf.get(n.id);
+        while (cur !== undefined) {
+          const p = nodeById.get(cur);
+          if (p && p.type === 'moc' && (action.moc || mode === 'error')) {
+            if (!finalIds.has(cur)) { finalIds.add(cur); reason.set(cur, 'moc-context'); }
+          }
+          cur = parentOf.get(cur);
+        }
+      };
+      if (node.type === 'Flash') {
+        climbMOC(node);
+        if (mode === 'method') {
+          const moc = parentOf.get(id);
+          (childrenOf.get(moc) || []).forEach(sib => {
+            const sn = nodeById.get(sib);
+            if (sn && sn.type === 'Flash' && sn.subtype === 'know_how' && !finalIds.has(sib)) {
+              finalIds.add(sib); reason.set(sib, 'flash-method-sibling');
+            }
+          });
+        }
+        if (action.error) {
+          (childrenOf.get(id) || []).forEach(child => {
+            if (!finalIds.has(child)) { finalIds.add(child); reason.set(child, 'error-from-flash'); }
+          });
+        }
+      } else if (node.type === 'Error') {
+        const pf = parentOf.get(id);
+        if (pf !== undefined) {
+          if (!finalIds.has(pf)) { finalIds.add(pf); reason.set(pf, 'flash-cause'); }
+          climbMOC(nodeById.get(pf));
+        }
+      } else if (node.type === 'moc' && mode === 'review') {
+        (childrenOf.get(id) || []).forEach(child => {
+          if (!finalIds.has(child)) { finalIds.add(child); reason.set(child, 'review-all'); }
+          (childrenOf.get(child) || []).forEach(g => {
+            if (!finalIds.has(g)) { finalIds.add(g); reason.set(g, 'review-all'); }
+          });
+        });
+      }
+    });
+
+    // 答案
+    ansBox.innerHTML = genAnswer(q, mode, finalIds, nodeById);
+    // 命中统计
+    let mc=0, fc=0, ec=0;
+    finalIds.forEach(id => {
+      const n = nodeById.get(id);
+      if (n.type === 'moc') mc++;
+      else if (n.type === 'Flash') fc++;
+      else if (n.type === 'Error') ec++;
+    });
+    document.getElementById('chipMoc').textContent = `MOC ${mc}`;
+    document.getElementById('chipFlash').textContent = `Flash ${fc}`;
+    document.getElementById('chipError').textContent = `Error ${ec}`;
+
+    render(finalIds, reason);
+  }, 450);
+}
+
+function genAnswer(q, mode, ids, nodeById) {
+  const names = [];
+  ids.forEach(id => { const n = nodeById.get(id); if (n) names.push(n.name); });
+  if (mode === 'concept') {
+    return '【学概念】围绕 <b>' + q + '</b> 的定义性知识：<br>' +
+      names.filter(n => !n.includes('数') || n.includes('定义') || n.includes('精解') || n.includes('表')).slice(0,4).map(n => '• ' + n).join('<br>') +
+      '<br><span style="color:#94a3b8;font-size:10px">→ MOC + know_what Flash，过滤了方法和错题</span>';
+  } else if (mode === 'method') {
+    return '【找方法】<b>' + q + '</b> 的做题套路：<br>' +
+      names.filter(n => !n.includes('定义') && !n.includes('精解') && !(n.includes('数') && n.includes(')'))).slice(0,4).map(n => '• ' + n).join('<br>') +
+      '<br><span style="color:#94a3b8;font-size:10px">→ know_how Flash，过滤了定义和错题</span>';
+  } else if (mode === 'error') {
+    const errs = names.filter(n => n.includes('数') && n.includes(')'));
+    return '【查错题】<b>' + q + '</b> 相关错题 + 错因：<br>' +
+      errs.slice(0,4).map(n => '• ' + n).join('<br>') +
+      '<br><span style="color:#94a3b8;font-size:10px">→ Error 卡 + 反查暴露的 Flash 套路盲点</span>';
+  } else {
+    return '【复习专题】<b>' + q + '</b> 完整学习包（' + ids.size + ' 节点）：<br>' +
+      '<span style="color:#94a3b8;font-size:10px">→ MOC + 全 subtype Flash + Error，系统性复习</span>';
+  }
+}
+
+// 自定义下拉逻辑
+let currentMode = 'concept';
+function toggleDropdown(id) {
+  const dd = document.getElementById(id);
+  const isOpen = dd.classList.contains('open');
+  // 关所有
+  document.querySelectorAll('.dropdown.open').forEach(d => d.classList.remove('open'));
+  if (!isOpen) dd.classList.add('open');
+}
+function selectMode(value, label, desc) {
+  currentMode = value;
+  document.getElementById('modeLabel').textContent = label;
+  document.querySelectorAll('#modeDropdown .dropdown-item').forEach(it => {
+    it.classList.toggle('selected', it.dataset.value === value);
+  });
+  document.getElementById('modeDropdown').classList.remove('open');
+}
+// 点击外部 / ESC 关闭下拉
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.dropdown')) {
+    document.querySelectorAll('.dropdown.open').forEach(d => d.classList.remove('open'));
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    document.querySelectorAll('.dropdown.open').forEach(d => d.classList.remove('open'));
+  }
+});
+
+function toggleFab() {
+  const fab = document.getElementById('queryFab');
+  fab.classList.toggle('collapsed');
+  document.getElementById('toggleText').textContent = fab.classList.contains('collapsed') ? '展开' : '收起';
+}
+
+// 主题切换（测试用，真实集成时由 Obsidian 的 updateThemeColor 驱动）
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  setTimeout(() => {
+    if (currentActive && currentReason) render(currentActive, currentReason);
+    else render(null, null);
+  }, 50);
+}
+
+// 初始化主题：跟随系统偏好
+(function initTheme() {
+  const prefersLight = window.matchMedia('(prefers-color-scheme: light)').matches;
+  document.documentElement.setAttribute('data-theme', prefersLight ? 'light' : 'dark');
+})();
+
+document.getElementById('q').addEventListener('keydown', e => { if (e.key === 'Enter') runQuery(); });
+
+// 初始渲染
+render(null, null);
+</script>
+</body>
+</html>

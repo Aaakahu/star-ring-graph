@@ -2,3 +2,14 @@ node_modules/
 *.bak
 *.log
 .DS_Store
+
+# LightRAG 后端
+lightrag/venv/
+lightrag/.env
+lightrag/rag_storage/
+lightrag/inputs/
+lightrag/__pycache__/
+lightrag/*.pyc
+lightrag/ingest_state.json
+lightrag/lightrag.pid
+lightrag/lightrag.log
