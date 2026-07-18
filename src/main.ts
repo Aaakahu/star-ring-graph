@@ -20,12 +20,47 @@ export interface StarRingSettings {
   detailZoom: number;            // 预留（当前旭日图不消费，但 slider 保留）
   // ===== LightRAG 配置（方案 B：插件面板填 → 写 .env → 重启 server）=====
   lightragUrl: string;           // LightRAG server 地址（查询用）
-  llmApiKey: string;             // GLM API key（密码框，写进 .env）
-  llmBaseUrl: string;            // LLM base URL（默认智谱）
+  llmProvider: string;           // 服务商预设：glm/deepseek/openai/claude/custom
+  llmApiKey: string;             // LLM API key（密码框，写进 .env）
+  llmBaseUrl: string;            // LLM base URL
   llmModel: string;              // LLM 模型名
+  embeddingApiKey: string;       // Embedding API key（留空=用 llmApiKey）
+  embeddingBaseUrl: string;      // Embedding base URL（留空=用 llmBaseUrl）
   embeddingModel: string;        // Embedding 模型名
   lightragDir: string;           // lightrag/ 目录的绝对路径（含 venv + restart.sh）
 }
+
+// 服务商预设：选了自动填 base_url + 模型名。DeepSeek 无 embedding，Claude 走 OpenRouter。
+const LLM_PRESETS: Record<string, {
+  label: string;
+  llmBaseUrl: string; llmModel: string;
+  embeddingBaseUrl: string; embeddingModel: string;
+  note?: string;
+}> = {
+  glm: {
+    label: "智谱 GLM",
+    llmBaseUrl: "https://open.bigmodel.cn/api/paas/v4", llmModel: "glm-4.5",
+    embeddingBaseUrl: "https://open.bigmodel.cn/api/paas/v4", embeddingModel: "embedding-3",
+  },
+  deepseek: {
+    label: "DeepSeek",
+    llmBaseUrl: "https://api.deepseek.com/v1", llmModel: "deepseek-chat",
+    embeddingBaseUrl: "https://api.openai.com/v1", embeddingModel: "text-embedding-3-small",
+    note: "DeepSeek 无 embedding 模型，embedding 默认配 OpenAI（需另填 OpenAI key）",
+  },
+  openai: {
+    label: "OpenAI",
+    llmBaseUrl: "https://api.openai.com/v1", llmModel: "gpt-4o-mini",
+    embeddingBaseUrl: "https://api.openai.com/v1", embeddingModel: "text-embedding-3-small",
+  },
+  claude: {
+    label: "Claude（via OpenRouter）",
+    llmBaseUrl: "https://openrouter.ai/api/v1", llmModel: "anthropic/claude-3.5-sonnet",
+    embeddingBaseUrl: "https://api.openai.com/v1", embeddingModel: "text-embedding-3-small",
+    note: "Claude 原生 API 非 OpenAI 兼容，通过 OpenRouter 代理；embedding 需另配",
+  },
+  custom: { label: "自定义", llmBaseUrl: "", llmModel: "", embeddingBaseUrl: "", embeddingModel: "" },
+};
 
 const DEFAULT_SETTINGS: StarRingSettings = {
   sources: [
@@ -39,11 +74,14 @@ const DEFAULT_SETTINGS: StarRingSettings = {
   layout: "fishbone",
   detailZoom: 1.5,
   lightragUrl: "http://127.0.0.1:9620",
+  llmProvider: "glm",
   llmApiKey: "",
   llmBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
   llmModel: "glm-4.5",
+  embeddingApiKey: "",   // 留空 = 用 llmApiKey
+  embeddingBaseUrl: "",  // 留空 = 用 llmBaseUrl
   embeddingModel: "embedding-3",
-  lightragDir: "",  // loadSettings 时若为空，按插件目录补全
+  lightragDir: "",
 };
 
 export default class StarRingGraphPlugin extends Plugin {
@@ -119,10 +157,18 @@ export default class StarRingGraphPlugin extends Plugin {
     }
     // 校验关键字段非空
     if (!this.settings.llmApiKey) {
-      return { ok: false, msg: "GLM API Key 不能为空" };
+      return { ok: false, msg: "LLM API Key 不能为空" };
+    }
+    // embedding 最终用的 key（回退到 LLM key）
+    const embKey = this.settings.embeddingApiKey || this.settings.llmApiKey;
+    if (!embKey) {
+      return { ok: false, msg: "Embedding API Key 不能为空（LLM key 为空时 embedding 必须单独填）" };
     }
 
     // 写 .env（变量名对齐 lightrag-hku 1.5.4 config.py：LLM_BINDING_HOST / EMBEDDING_BINDING_HOST）
+    // embedding 字段留空时回退到 LLM 的（DeepSeek/Claude 场景 embedding 需另配）
+    // embKey 已在上方校验时声明；embUrl 同样回退到 LLM 的
+    const embUrl = this.settings.embeddingBaseUrl || this.settings.llmBaseUrl;
     const envContent = [
       `# 由星环图谱插件自动生成 — ${new Date().toISOString()}`,
       `# 勿手动编辑（会被插件「应用并重启」覆盖）`,
@@ -133,11 +179,11 @@ export default class StarRingGraphPlugin extends Plugin {
       `LLM_MODEL=${this.settings.llmModel}`,
       `LLM_BINDING_HOST=${this.settings.llmBaseUrl}`,
       ``,
-      `# Embedding 配置`,
+      `# Embedding 配置（留空字段已回退到 LLM 的值）`,
       `EMBEDDING_BINDING=openai`,
-      `EMBEDDING_API_KEY=${this.settings.llmApiKey}`,
+      `EMBEDDING_API_KEY=${embKey}`,
       `EMBEDDING_MODEL=${this.settings.embeddingModel}`,
-      `EMBEDDING_BINDING_HOST=${this.settings.llmBaseUrl}`,
+      `EMBEDDING_BINDING_HOST=${embUrl}`,
       ``,
       `# 存储配置`,
       `LIGHTRAG_DATA_DIR=${path.join(dir, "rag_storage").replace(/\\/g, "/")}`,
@@ -328,7 +374,7 @@ class StarRingSettingTab extends PluginSettingTab {
     // ============ LightRAG 配置（方案 B）============
     containerEl.createEl("h3", { text: "LightRAG 知识库查询" });
     containerEl.createEl("p", {
-      text: "填入 GLM API 配置后点「应用并重启」，插件会写入 lightrag/.env 并重启 server。首次部署见 lightrag/README.md。",
+      text: "选服务商预设自动填配置（填完可改），点「应用并重启」写入 .env 并重启 server。",
       cls: "setting-item-description"
     });
 
@@ -339,9 +385,41 @@ class StarRingSettingTab extends PluginSettingTab {
         .setValue(this.plugin.settings.lightragUrl)
         .onChange(async v => { this.plugin.settings.lightragUrl = v; await this.plugin.saveSettings(); }));
 
+    // 服务商预设下拉：选了自动填 base_url + 模型名
     new Setting(containerEl)
-      .setName("GLM API Key")
-      .setDesc("智谱 API key（去 open.bigmodel.cn 申请）")
+      .setName("LLM 服务商")
+      .setDesc("选预设自动填下面的字段；选「自定义」全部手填")
+      .addDropdown(d => {
+        Object.entries(LLM_PRESETS).forEach(([key, p]) => d.addOption(key, p.label));
+        d.setValue(this.plugin.settings.llmProvider)
+          .onChange(async v => {
+            this.plugin.settings.llmProvider = v;
+            const preset = LLM_PRESETS[v];
+            if (preset) {
+              this.plugin.settings.llmBaseUrl = preset.llmBaseUrl;
+              this.plugin.settings.llmModel = preset.llmModel;
+              this.plugin.settings.embeddingBaseUrl = preset.embeddingBaseUrl;
+              this.plugin.settings.embeddingModel = preset.embeddingModel;
+            }
+            await this.plugin.saveSettings();
+            this.display(); // 重渲染让下面的字段显示新值
+          });
+      });
+
+    // 预设的特殊提示（DeepSeek/Claude 的 embedding 注意事项）
+    const curPreset = LLM_PRESETS[this.plugin.settings.llmProvider];
+    if (curPreset?.note) {
+      containerEl.createEl("p", {
+        text: "⚠ " + curPreset.note,
+        cls: "setting-item-description"
+      });
+    }
+
+    containerEl.createEl("h4", { text: "LLM（生成答案 + 抽实体）" });
+
+    new Setting(containerEl)
+      .setName("LLM API Key")
+      .setDesc("对应所选服务商的 API key")
       .addText(t => {
         t.inputEl.type = "password";
         t.setValue(this.plugin.settings.llmApiKey)
@@ -350,21 +428,43 @@ class StarRingSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("LLM Base URL")
-      .setDesc("智谱 OpenAI 兼容端点")
+      .setDesc("OpenAI 兼容端点")
       .addText(t => t
         .setValue(this.plugin.settings.llmBaseUrl)
         .onChange(async v => { this.plugin.settings.llmBaseUrl = v; await this.plugin.saveSettings(); }));
 
     new Setting(containerEl)
       .setName("LLM 模型名")
-      .setDesc("如 glm-4.5 / glm-4.5-air / glm-4-plus")
+      .setDesc("如 glm-4.5 / deepseek-chat / gpt-4o-mini")
       .addText(t => t
         .setValue(this.plugin.settings.llmModel)
         .onChange(async v => { this.plugin.settings.llmModel = v; await this.plugin.saveSettings(); }));
 
+    containerEl.createEl("h4", { text: "Embedding（向量化）" });
+    containerEl.createEl("p", {
+      text: "留空 API Key / Base URL = 复用上面 LLM 的。DeepSeek/Claude 需另配（它们无 embedding）。",
+      cls: "setting-item-description"
+    });
+
+    new Setting(containerEl)
+      .setName("Embedding API Key")
+      .setDesc("留空 = 用 LLM 的 key")
+      .addText(t => {
+        t.inputEl.type = "password";
+        t.setValue(this.plugin.settings.embeddingApiKey)
+          .onChange(async v => { this.plugin.settings.embeddingApiKey = v; await this.plugin.saveSettings(); });
+      });
+
+    new Setting(containerEl)
+      .setName("Embedding Base URL")
+      .setDesc("留空 = 用 LLM 的 URL")
+      .addText(t => t
+        .setValue(this.plugin.settings.embeddingBaseUrl)
+        .onChange(async v => { this.plugin.settings.embeddingBaseUrl = v; await this.plugin.saveSettings(); }));
+
     new Setting(containerEl)
       .setName("Embedding 模型名")
-      .setDesc("如 embedding-3 / embedding-2")
+      .setDesc("如 embedding-3 / text-embedding-3-small")
       .addText(t => t
         .setValue(this.plugin.settings.embeddingModel)
         .onChange(async v => { this.plugin.settings.embeddingModel = v; await this.plugin.saveSettings(); }));
@@ -379,7 +479,7 @@ class StarRingSettingTab extends PluginSettingTab {
     // "应用并重启"按钮 — 方案 B 核心
     new Setting(containerEl)
       .setName("应用并重启 LightRAG")
-      .setDesc("把上面的 GLM 配置写入 .env 并重启 server（约 5-15 秒）")
+      .setDesc("把上面的配置写入 .env 并重启 server（约 5-15 秒）")
       .addButton(b => b
         .setButtonText("应用并重启")
         .setCta()
