@@ -143,6 +143,21 @@ export default class StarRingGraphPlugin extends Plugin {
   }
 
   /**
+   * 按 embedding 模型名推断输出维度。
+   * ponytail: 硬编码常见模型 → 维度映射。新模型加一行即可。
+   * 维度不匹配会直接崩（IndexFlushError），所以宁可信模型表也不让用户手填错。
+   */
+  private getEmbeddingDim(): number {
+    const m = (this.settings.embeddingModel || '').toLowerCase();
+    if (m.includes('embedding-3')) return 2048;        // 智谱 embedding-3 默认 2048
+    if (m.includes('embedding-2')) return 1024;        // 智谱 embedding-2 固定 1024
+    if (m.includes('text-embedding-3-small')) return 1536;  // OpenAI small
+    if (m.includes('text-embedding-3-large')) return 3072;  // OpenAI large
+    if (m.includes('text-embedding-ada-002')) return 1536;  // OpenAI ada
+    return 2048; // 兜底：按智谱 embedding-3 默认
+  }
+
+  /**
    * 方案 B 核心：把面板里的 GLM 配置写入 lightrag/.env，然后调 restart.sh 重启 server。
    * 调用时机：用户点设置面板的"应用并重启 LightRAG"按钮。
    */
@@ -190,6 +205,9 @@ export default class StarRingGraphPlugin extends Plugin {
       `EMBEDDING_BINDING_API_KEY=${embKey}`,
       `EMBEDDING_MODEL=${this.settings.embeddingModel}`,
       `EMBEDDING_BINDING_HOST=${embUrl}`,
+      `# EMBEDDING_DIM 必须匹配模型实际输出维度，否则维度不匹配崩`,
+      `#   embedding-3 (智谱) = 2048, text-embedding-3-small (OpenAI) = 1536, embedding-2 (智谱) = 1024`,
+      `EMBEDDING_DIM=${this.getEmbeddingDim()},`,
       ``,
       `# 存储配置`,
       `LIGHTRAG_DATA_DIR=${path.join(dir, "rag_storage").replace(/\\/g, "/")}`,
