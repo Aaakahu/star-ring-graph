@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>星云视图：去中心化多星团 vs 虚拟根单环</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e; color: #e0e0e0;
+    font-family: system-ui, -apple-system, sans-serif;
+    padding: 20px;
+  }
+  h1 { font-size: 18px; margin-bottom: 6px; color: #f0a94f; }
+  .subtitle { font-size: 13px; color: #888; margin-bottom: 16px; line-height: 1.6; }
+  .panels { display: flex; gap: 16px; flex-wrap: wrap; }
+  .panel {
+    background: #16213e; border-radius: 10px; padding: 14px;
+    flex: 1; min-width: 420px; max-width: 560px;
+  }
+  .panel-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+  .panel-desc { font-size: 11px; color: #999; margin-bottom: 10px; line-height: 1.5; min-height: 60px; }
+  canvas { display: block; border-radius: 6px; background: #0d1117; width: 100%; }
+  .legend { display: flex; gap: 12px; margin-top: 12px; flex-wrap: wrap; font-size: 11px; }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .legend-line { width: 22px; height: 0; border-top: 2px solid; }
+  .solid { border-top-style: solid; border-color: #5a6a7a; }
+  .dashed { border-top-style: dashed; border-color: #4fd1c5; }
+  .legend-ring { width: 14px; height: 14px; border-radius: 50%; border: 1px dashed #ffffff22; }
+</style>
+</head>
+<body>
+
+<h1>星云视图：去中心化多星团 vs 虚拟根单环</h1>
+<div class="subtitle">
+  模拟命中数据含混合场景：①一条 MOC→flash→error 硬连接链 ②两个 flash 互指(软连接) ③共享"泰勒"命中词的散点 ④完全孤立的单点<br>
+  左：当前方案(虚拟根 + 全拍平 level=1，实线)。右：去中心化多星团(连通分量分解，局部 sector，硬软连接各归位)。
+</div>
+
+<div class="panels">
+  <div class="panel">
+    <div class="panel-title">① 当前：虚拟根单环</div>
+    <div class="panel-desc">
+      所有命中节点拍平 level=1 挂虚拟根下，均匀铺一个环。看不出谁和谁真有关系，虚拟根连线制造了不存在的关系。
+    </div>
+    <canvas id="cv1" width="500" height="500"></canvas>
+  </div>
+  <div class="panel">
+    <div class="panel-title">② 去中心化：多星团</div>
+    <div class="panel-desc">
+      连通分量分解 → 有硬连接的成星团(MOC局部中心) → 共享命中词的散点归组 → 真孤立点单独飘。<br>
+      星团间不连线，画布上均匀分布。硬连接实线、软连接虚线原样保留。
+    </div>
+    <canvas id="cv2" width="500" height="500"></canvas>
+  </div>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><span class="legend-dot" style="background:#f0a94f"></span> MOC(局部中心)</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#e06c75"></span> flash 知识卡</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#c678dd"></span> error 错题卡</div>
+  <div class="legend-item"><span class="legend-line solid"></span> tree 实线(硬连接)</div>
+  <div class="legend-item"><span class="legend-line dashed"></span> aux 虚线(软连接)</div>
+  <div class="legend-item"><span class="legend-ring"></span> 星团边界</div>
+</div>
+
+<script>
+// ===== 配色 =====
+const C = {
+  moc:   { fill: '#4fd1c5', stroke: '#3db8ad', r: 11 },
+  flash: { fill: '#e06c75', stroke: '#c4555e', r: 7 },
+  error: { fill: '#c678dd', stroke: '#a35bb8', r: 7 },
+};
+const HARD = '#6a7a8a', SOFT = '#4fd1c5';
+
+// ===== 模拟命中数据：混合场景 =====
+// id, type, label, 以及节点间的关系边
+const hitData = {
+  nodes: [
+    // 星团 A：MOC→flash→error 硬连接链（泰勒公式主题）
+    { id: 'a_moc',   type: 'moc',   label: '泰勒公式' },
+    { id: 'a_f1',    type: 'flash', label: '麦克劳林展开' },
+    { id: 'a_f2',    type: 'flash', label: '余项估计' },
+    { id: 'a_e1',    type: 'error', label: '展开阶数选错' },
+    // a_moc → a_f1, a_f2 (tree); a_f1 → a_e1 (tree)
+
+    // 星团 B：两个 flash 互指（软连接 aux）
+    { id: 'b_f1', type: 'flash', label: '洛必达法则' },
+    { id: 'b_f2', type: 'flash', label: '柯西中值定理' },
+    // b_f1 ↔ b_f2 (aux)
+
+    // 星团 C：共享"极限"命中词的散点（无结构边，按词聚类）
+    { id: 'c_f1', type: 'flash', label: '数列极限定义' },
+    { id: 'c_f2', type: 'flash', label: '函数极限 ε-δ' },
+    { id: 'c_e1', type: 'error', label: '极限方向判断错' },
+
+    // 星团 D：真·孤立单点
+    { id: 'd_f1', type: 'flash', label: '换元积分法' },
+  ],
+  edges: [
+    // 星团 A 硬连接
+    { s: 'a_moc', t: 'a_f1', rel: 'tree' },
+    { s: 'a_moc', t: 'a_f2', rel: 'tree' },
+    { s: 'a_f1',  t: 'a_e1', rel: 'tree' },
+    // 星团 B 软连接
+    { s: 'b_f1', t: 'b_f2', rel: 'aux' },
+    // 星团 C 无边（靠命中词聚类）
+    // 星团 D 无边（真孤立）
+  ],
+  // 星团 C 的聚类依据（模拟 FTS 命中词）
+  wordGroups: { '极限': ['c_f1', 'c_f2', 'c_e1'] },
+};
+
+// ===== 工具：连通分量分解 =====
+function connectedComponents(nodes, edges) {
+  const adj = {};
+  nodes.forEach(n => adj[n.id] = new Set());
+  edges.forEach(e => {
+    adj[e.s]?.add(e.t); adj[e.t]?.add(e.s);
+  });
+  const visited = new Set();
+  const comps = [];
+  nodes.forEach(n => {
+    if (visited.has(n.id)) return;
+    const comp = [];
+    const q = [n.id];
+    while (q.length) {
+      const cur = q.shift();
+      if (visited.has(cur)) continue;
+      visited.add(cur);
+      comp.push(cur);
+      adj[cur].forEach(nb => { if (!visited.has(nb)) q.push(nb); });
+    }
+    comps.push(comp);
+  });
+  return comps;
+}
+
+// ===== 面板①：当前方案（虚拟根单环）=====
+function drawCurrent(canvasId) {
+  const cv = document.getElementById(canvasId);
+  const ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height, cx = W/2, cy = H/2;
+  ctx.clearRect(0,0,W,H);
+
+  const byId = {}; hitData.nodes.forEach(n => byId[n.id] = n);
+  const baseR = 170;
+  const N = hitData.nodes.length;
+
+  // 轨道圆
+  ctx.strokeStyle = '#ffffff08'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(cx, cy, baseR, 0, Math.PI*2); ctx.stroke();
+
+  const pos = {};
+  hitData.nodes.forEach((n, i) => {
+    const a = -Math.PI/2 + (i/N) * Math.PI*2;
+    pos[n.id] = { x: cx + Math.cos(a)*baseR, y: cy + Math.sin(a)*baseR, a };
+  });
+
+  // 虚拟根→所有节点 实线
+  hitData.nodes.forEach(n => {
+    const p = pos[n.id];
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(p.x, p.y);
+    ctx.strokeStyle = HARD + 'aa'; ctx.lineWidth = 1.2; ctx.setLineDash([]);
+    ctx.stroke();
+  });
+
+  // 命中间原始边（被当前方案忽略，不画——这就是当前方案的信息损失）
+  // 当前方案把命中间边全删了，所以这里不画
+
+  // 节点 + 标签
+  drawNodes(ctx, hitData.nodes, pos, cx, cy);
+
+  // 虚拟根
+  drawRoot(ctx, cx, cy);
+}
+
+// ===== 面板②：去中心化多星团 =====
+function drawClusters(canvasId) {
+  const cv = document.getElementById(canvasId);
+  const ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height, cx = W/2, cy = H/2;
+  ctx.clearRect(0,0,W,H);
+
+  const byId = {}; hitData.nodes.forEach(n => byId[n.id] = n);
+
+  // 第一刀：连通分量分解
+  let comps = connectedComponents(hitData.nodes, hitData.edges);
+
+  // 第二刀：把孤立单点按命中词归并
+  const wordComps = {};
+  Object.entries(hitData.wordGroups).forEach(([word, ids]) => {
+    const orphans = ids.filter(id => {
+      const c = comps.find(comp => comp.includes(id));
+      return c && c.length === 1; // 只归并孤立单点
+    });
+    if (orphans.length > 1) {
+      wordComps[word] = orphans;
+      // 从 comps 里移除这些单点
+      comps = comps.filter(comp => !orphans.includes(comp[0]));
+    }
+  });
+
+  // 合并所有星团
+  const allClusters = [...comps];
+  Object.entries(wordComps).forEach(([word, ids]) => allClusters.push(ids));
+  // 星团 D 真孤立单点（没被词归并的）
+  // 已在 comps 里
+
+  // 星团中心在画布上圆周分布
+  const clusterR = 160; // 星团中心环半径
+  const clusterPos = allClusters.map((comp, i) => {
+    const a = -Math.PI/2 + (i / allClusters.length) * Math.PI*2;
+    return { cx: cx + Math.cos(a)*clusterR, cy: cy + Math.sin(a)*clusterR, comp };
+  });
+
+  const nodePos = {};
+
+  clusterPos.forEach(({ cx: ccx, cy: ccy, comp }) => {
+    const compNodes = comp.map(id => byId[id]);
+    const hasMoc = compNodes.some(n => n.type === 'moc');
+    const mocNode = compNodes.find(n => n.type === 'moc');
+    const childNodes = compNodes.filter(n => n !== mocNode);
+
+    if (hasMoc && childNodes.length > 0) {
+      // 有 MOC 的星团：MOC 居中，子节点 sector 环绕
+      nodePos[mocNode.id] = { x: ccx, y: ccy, a: 0 };
+      const innerR = 55;
+      childNodes.forEach((n, i) => {
+        const a = -Math.PI/2 + (i / childNodes.length) * Math.PI*2;
+        nodePos[n.id] = { x: ccx + Math.cos(a)*innerR, y: ccy + Math.sin(a)*innerR, a };
+      });
+      // 星团边界圈
+      drawClusterBoundary(ctx, ccx, ccy, innerR + 22);
+    } else {
+      // 无 MOC 的散点星团：均匀环，中心留空
+      const ringR = 40;
+      compNodes.forEach((n, i) => {
+        const a = -Math.PI/2 + (i / compNodes.length) * Math.PI*2;
+        nodePos[n.id] = { x: ccx + Math.cos(a)*ringR, y: ccy + Math.sin(a)*ringR, a };
+      });
+      drawClusterBoundary(ctx, ccx, ccy, ringR + 20);
+    }
+  });
+
+  // 画边：只画星团内部的原始终（硬实线 / 软虚线），星团间不连线
+  hitData.edges.forEach(e => {
+    const sp = nodePos[e.s], tp = nodePos[e.t];
+    if (!sp || !tp) return;
+    ctx.beginPath(); ctx.moveTo(sp.x, sp.y); ctx.lineTo(tp.x, tp.y);
+    if (e.rel === 'tree') {
+      ctx.strokeStyle = HARD; ctx.lineWidth = 1.5; ctx.setLineDash([]);
+    } else {
+      ctx.strokeStyle = SOFT + 'aa'; ctx.lineWidth = 1; ctx.setLineDash([4,3]);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  });
+
+  // 散点星团内：画共享词的软连接虚线（表示"因同词聚集"）
+  Object.entries(hitData.wordGroups).forEach(([word, ids]) => {
+    const pts = ids.map(id => nodePos[id]).filter(Boolean);
+    for (let i = 0; i < pts.length; i++) {
+      for (let j = i+1; j < pts.length; j++) {
+        ctx.beginPath(); ctx.moveTo(pts[i].x, pts[i].y); ctx.lineTo(pts[j].x, pts[j].y);
+        ctx.strokeStyle = SOFT + '55'; ctx.lineWidth = 0.8; ctx.setLineDash([3,3]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+  });
+
+  // 节点
+  drawNodes(ctx, hitData.nodes, nodePos, null, null);
+}
+
+// ===== 绘制工具函数 =====
+function drawNodes(ctx, nodes, pos, globalCx, globalCy) {
+  nodes.forEach(n => {
+    const p = pos[n.id];
+    if (!p) return;
+    const c = C[n.type];
+    ctx.beginPath(); ctx.arc(p.x, p.y, c.r, 0, Math.PI*2);
+    ctx.fillStyle = c.fill; ctx.fill();
+    ctx.strokeStyle = c.stroke; ctx.lineWidth = 1.5; ctx.stroke();
+
+    // 标签
+    const ang = globalCx != null ? Math.atan2(p.y - globalCy, p.x - globalCx) : p.a;
+    const lx = p.x + Math.cos(ang) * (c.r + 7);
+    const ly = p.y + Math.sin(ang) * (c.r + 7);
+    ctx.fillStyle = '#b8b8b8'; ctx.font = '10px system-ui';
+    ctx.textAlign = Math.cos(ang) >= 0 ? 'left' : 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(n.label, lx, ly);
+  });
+}
+
+function drawRoot(ctx, cx, cy) {
+  ctx.beginPath(); ctx.arc(cx, cy, 14, 0, Math.PI*2);
+  ctx.fillStyle = '#f0a94f'; ctx.fill();
+  ctx.strokeStyle = '#c4883f'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = '#1a1a2e'; ctx.font = 'bold 8px system-ui';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('查询', cx, cy);
+}
+
+function drawClusterBoundary(ctx, cx, cy, r) {
+  ctx.strokeStyle = '#ffffff0c'; ctx.lineWidth = 1; ctx.setLineDash([2,4]);
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+// 渲染
+drawCurrent('cv1');
+drawClusters('cv2');
+</script>
+
+</body>
+</html>

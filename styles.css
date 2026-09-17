@@ -14,14 +14,29 @@
   --sr-minimap-border: #444;
   --sr-focus-text: #c9b8ff;
   --sr-focus-bg: rgba(40, 30, 60, 0.85);
-  --sr-focus-border: #6b4fa8;
+  --sr-focus-border: #a78bfa;
   --sr-hover-shadow: #fff;
   --sr-hover-edge: #a78bfa;
   --sr-error-text: #e55;
+  --sr-axis: rgba(255, 255, 255, 0.35);
+  --sr-grid: rgba(255, 255, 255, 0.08);
+  --sr-text-muted: rgba(255, 255, 255, 0.5);
+  --sr-text-dim: #c6a6a2;
+  --sr-info-text: #96A0AB;
+
+  /* 统一字号刻度，供后续收敛使用 */
+  --sr-fs-10: 10px;
+  --sr-fs-11: 11px;
+  --sr-fs-12: 12px;
+  --sr-fs-13: 13px;
+  --sr-fs-14: 14px;
+  --sr-fs-16: 16px;
+  --sr-fs-18: 18px;
+  --sr-fs-22: 22px;
 
   background: radial-gradient(circle at center, var(--sr-bg-start) 0%, var(--sr-bg-end) 100%);
   color: var(--sr-text);
-  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  font-family: "Sring UI Sans", 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
   overflow: hidden;
   padding: 0;
   position: relative;
@@ -37,12 +52,27 @@ body.theme-light .star-ring-view {
   --sr-aux-edge: #6b7c92;
   --sr-minimap-bg: rgba(255, 255, 255, 0.85);
   --sr-minimap-border: #ccc;
-  --sr-focus-text: #6b4fa8;
+  --sr-focus-text: #7c3aed;
   --sr-focus-bg: rgba(245, 240, 255, 0.9);
-  --sr-focus-border: #a78bfa;
+  --sr-focus-border: #7c3aed;
   --sr-hover-shadow: #1f2937;
-  --sr-hover-edge: #6b4fa8;
+  --sr-hover-edge: #7c3aed;
   --sr-error-text: #c00;
+  --sr-axis: rgba(31, 41, 55, 0.4);
+  --sr-grid: rgba(31, 41, 55, 0.1);
+  --sr-text-muted: rgba(31, 41, 55, 0.55);
+  --sr-text-dim: #b08a86;
+  --sr-info-text: #6b7a8a;
+
+  /* 统一字号刻度，供后续收敛使用 */
+  --sr-fs-10: 10px;
+  --sr-fs-11: 11px;
+  --sr-fs-12: 12px;
+  --sr-fs-13: 13px;
+  --sr-fs-14: 14px;
+  --sr-fs-16: 16px;
+  --sr-fs-18: 18px;
+  --sr-fs-22: 22px;
 }
 
 .star-ring-view .g6-container canvas {
@@ -144,8 +174,24 @@ body.theme-light .star-ring-view {
   font-family: var(--font-interface, -apple-system, "Segoe UI", sans-serif);
   transition: width var(--ast-dur-fast) var(--ast-ease), padding var(--ast-dur-fast) var(--ast-ease);
 }
-.sr-query-fab.collapsed { width: auto; padding: 4px; }
-.sr-query-fab.collapsed .sr-query-body { display: none; }
+/* 收起态悬浮 orb：单击展开卡片，Ctrl+单击刷新图谱，可拖动 */
+.sr-query-orb {
+  position: absolute;
+  z-index: 10;
+  width: 40px; height: 40px;
+  border-radius: var(--ast-r-full);
+  background: var(--ast-bg-popover);
+  border: 1px solid var(--ast-border);
+  box-shadow: var(--ast-shadow-high);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--ast-text-primary);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  transition: border-color var(--ast-dur-fast) var(--ast-ease), transform var(--ast-dur-fast) var(--ast-ease);
+}
+.sr-query-orb:hover { border-color: var(--ast-border-emphasized); transform: scale(1.05); }
+.sr-query-orb:active { cursor: grabbing; transform: scale(0.98); }
 
 .sr-query-header {
   display: flex; align-items: center; gap: 8px;
@@ -156,8 +202,7 @@ body.theme-light .star-ring-view {
   transition: background-color 112ms var(--ast-ease);
 }
 .sr-query-header:hover { background: var(--ast-overlay-hover); }
-.sr-query-title { font-size: 14px; font-weight: 500; flex: 1; }
-.sr-query-toggle { font-size: 12px; color: var(--ast-text-secondary); }
+.sr-query-title { font-size: var(--sr-fs-14); font-weight: 500; flex: 1; }
 
 .sr-query-body { display: flex; flex-direction: column; gap: 8px; padding: 4px; }
 .sr-query-row { display: flex; gap: 8px; align-items: stretch; }
@@ -184,6 +229,9 @@ body.theme-light .star-ring-view {
   font-family: inherit;
 }
 .sr-query-input::placeholder { color: var(--ast-text-secondary); }
+/* similar 模式禁用输入框：置灰 + 鼠标禁用样式 */
+.sr-query-input:disabled { cursor: not-allowed; opacity: 0.55; }
+.sr-input-wrap:has(.sr-query-input:disabled) { opacity: 0.7; cursor: not-allowed; }
 
 /* 自定义下拉 */
 .sr-dropdown { position: relative; }
@@ -267,4 +315,82 @@ body.theme-light .star-ring-view {
 .sr-chip-moc   { background: var(--ast-bg-teal); color: var(--ast-text-teal); }
 .sr-chip-flash { background: var(--ast-bg-blue); color: var(--ast-text-blue); }
 .sr-chip-error { background: var(--ast-bg-pink); color: var(--ast-text-pink); }
+
+/* 查询高亮遮蔽罩：盖在 canvas 上，浮层(z:10)和命中节点不受影响 */
+.sr-veil {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: var(--color-base-00, #000);
+  opacity: 0.65; /* 提一档（原 0.55），让彩色命中节点穿透时更醒目 */
+  z-index: 5;
+  pointer-events: none;
+  border-radius: inherit;
+  transition: opacity var(--ast-dur-medium, 220ms) var(--ast-ease, cubic-bezier(0.24,1,0.4,1));
+}
+/* 浅色主题下用深灰而非纯黑，避免太刺眼 */
+body.theme-light .sr-veil { background: #2e3338; opacity: 0.5; }
+
+/* 深度检索复选框切换条 */
+.sr-mode-toggle {
+  display: flex; align-items: center; gap: 8px;
+  margin: 6px 0 2px;
+  font-size: 11px;
+}
+.sr-deep-toggle {
+  display: inline-flex; align-items: center; gap: 4px;
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 8px;
+  border-radius: var(--ast-r-full, 999px);
+  background: var(--ast-bg-elevated, rgba(255,255,255,0.04));
+  border: 1px solid var(--ast-border, rgba(255,255,255,0.08));
+  transition: background var(--ast-dur-fast, 140ms) var(--ast-ease, cubic-bezier(0.24,1,0.4,1));
+}
+.sr-deep-toggle:hover { background: var(--ast-bg-hover, rgba(255,255,255,0.08)); }
+.sr-deep-checkbox { margin: 0; cursor: pointer; }
+.sr-deep-label { color: var(--ast-text-secondary, #96A0AB); }
+.sr-deep-checkbox:checked + .sr-deep-label { color: var(--ast-accent, #a78bfa); font-weight: 500; }
+.sr-mode-hint { color: var(--ast-text-tertiary, #6B7280); font-size: 10px; }
+
+/* 快速检索结果列表 */
+.sr-hits-list { display: flex; flex-direction: column; gap: 2px; max-height: 200px; overflow-y: auto; }
+.sr-hit-item {
+  padding: 2px 6px;
+  border-radius: var(--ast-r-element, 6px);
+  background: var(--ast-bg-elevated, rgba(255,255,255,0.03));
+  border: 1px solid var(--ast-border, rgba(255,255,255,0.06));
+  transition: background var(--ast-dur-fast, 140ms) var(--ast-ease, cubic-bezier(0.24,1,0.4,1));
+  line-height: 1.3;
+}
+.sr-hit-item:hover { background: var(--ast-bg-hover, rgba(255,255,255,0.07)); }
+.sr-hit-title { font-size: 11px; color: var(--ast-text-primary, #e6edf3); margin-bottom: 0; }
+.sr-hit-chap {
+  display: inline-block; padding: 0 4px; margin-right: 3px;
+  border-radius: 3px; font-size: 9px;
+  background: var(--ast-bg-blue, rgba(59,130,246,0.15));
+  color: var(--ast-text-blue, #60a5fa);
+}
+.sr-hit-meta { font-size: 9px; color: var(--ast-text-secondary, #96A0AB); }
+.sr-hit-topic {
+  display: inline-block; margin-left: 3px;
+  padding: 0 4px; border-radius: 3px;
+  background: var(--ast-bg-teal, rgba(20,184,166,0.12));
+  color: var(--ast-text-teal, #2dd4bf);
+}
+
+/* 聚焦态（直角坐标系）：小地图无意义且会显示旧式扇区缩略，隐藏 */
+.star-ring-view.is-focused {
+  display: flex;
+  flex-direction: column;
+}
+.star-ring-view.is-focused .star-ring-minimap {
+  display: none !important;
+}
+.star-ring-view.is-focused .g6-container {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
 

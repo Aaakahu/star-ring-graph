@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>星云视图布局方案对比</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e; color: #e0e0e0;
+    font-family: system-ui, -apple-system, sans-serif;
+    padding: 20px;
+  }
+  h1 { font-size: 18px; margin-bottom: 6px; color: #f0a94f; }
+  .subtitle { font-size: 13px; color: #888; margin-bottom: 20px; line-height: 1.6; }
+  .panels { display: flex; gap: 16px; flex-wrap: wrap; }
+  .panel {
+    background: #16213e; border-radius: 10px; padding: 14px;
+    flex: 1; min-width: 360px; max-width: 520px;
+  }
+  .panel-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+  .panel-desc { font-size: 11px; color: #999; margin-bottom: 10px; line-height: 1.5; min-height: 48px; }
+  .panel-desc .tag {
+    display: inline-block; font-size: 10px; padding: 1px 7px;
+    border-radius: 4px; margin-right: 4px; vertical-align: middle;
+  }
+  .tag-hard { background: #3d2d1a; color: #f0a94f; border: 1px solid #f0a94f44; }
+  .tag-soft { background: #1a2d3d; color: #4fd1c5; border: 1px solid #4fd1c544; }
+  canvas { display: block; border-radius: 6px; background: #0d1117; width: 100%; }
+  .legend { display: flex; gap: 12px; margin-top: 10px; flex-wrap: wrap; font-size: 11px; }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .legend-line { width: 20px; height: 0; border-top: 2px solid; }
+  .solid { border-top-style: solid; border-color: #666; }
+  .dashed { border-top-style: dashed; border-color: #4fd1c5; }
+  .controls { margin-top: 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .controls label { font-size: 12px; color: #aaa; }
+  .controls select, .controls button {
+    background: #16213e; color: #e0e0e0; border: 1px solid #334;
+    padding: 4px 10px; border-radius: 5px; font-size: 12px; cursor: pointer;
+  }
+  .controls button:hover { background: #1a2750; }
+</style>
+</head>
+<body>
+
+<h1>星云视图：硬连接(tree) vs 软连接(aux) 布局对比</h1>
+<div class="subtitle">
+  命中节点假设：5 个 MOC、8 个 flash(知识卡)、4 个 error(错题卡) = 17 个命中节点。<br>
+  三个面板并排对比不同连接方式下的节点分布。可以拖动滑块调整命中数。
+</div>
+
+<div class="controls">
+  <label>MOC 数: <input type="range" id="mocN" min="0" max="10" value="5"></label>
+  <label>知识卡数: <input type="range" id="flashN" min="0" max="15" value="8"></label>
+  <label>错题卡数: <input type="range" id="errN" min="0" max="10" value="4"></label>
+  <button id="redraw">重新生成</button>
+</div>
+
+<div class="panels">
+  <div class="panel">
+    <div class="panel-title">① 现状：tree 硬连接 + 全拍平 level=1</div>
+    <div class="panel-desc">
+      <span class="tag tag-hard">硬连接</span>
+      所有命中节点拍成 level=1 挂虚拟根下，tree 边驱动布局。<br>
+      全部落在同一环(baseR)，等权均匀分布。线是实线。
+    </div>
+    <canvas id="cv1" width="440" height="440"></canvas>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">② 软连接 aux + 均匀单环</div>
+    <div class="panel-desc">
+      <span class="tag tag-soft">纯软连接</span>
+      纯 aux 边，独立布局函数把命中节点均匀铺在一个环上。<br>
+      所有线虚线。和①的节点位置几乎一样（因为①也是等权均匀）。
+    </div>
+    <canvas id="cv2" width="440" height="440"></canvas>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">③ 软连接 aux + 三轨道分层</div>
+    <div class="panel-desc">
+      <span class="tag tag-soft">纯软连接</span>
+      纯 aux 边，按类型分轨道：MOC 内环 / flash 中环 / error 外环。<br>
+      所有线虚线。节点按类型进各自轨道。
+    </div>
+    <canvas id="cv3" width="440" height="440"></canvas>
+  </div>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><span class="legend-dot" style="background:#f0a94f"></span> 虚拟根(查询结果)</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#4fd1c5"></span> MOC</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#e06c75"></span> flash 知识卡</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#c678dd"></span> error 错题卡</div>
+  <div class="legend-item"><span class="legend-line solid"></span> tree 实线(硬)</div>
+  <div class="legend-item"><span class="legend-line dashed"></span> aux 虚线(软)</div>
+</div>
+
+<script>
+// ===== 配色（和插件 data.ts 一致）=====
+const COLORS = {
+  root:  { fill: '#f0a94f', stroke: '#c4883f', r: 16 },
+  moc:   { fill: '#4fd1c5', stroke: '#3db8ad', r: 9 },
+  flash: { fill: '#e06c75', stroke: '#c4555e', r: 6 },
+  error: { fill: '#c678dd', stroke: '#a35bb8', r: 6 },
+};
+const HARD_COLOR = '#5a6a7a';  // tree 实线
+const SOFT_COLOR = '#4fd1c5';  // aux 虚线
+const LABEL_COLOR = '#b0b0b0';
+
+// ===== 模拟命中节点生成 =====
+let nodes = [];
+function genNodes(mocN, flashN, errN) {
+  nodes = [];
+  const labels = {
+    moc: ['导数基础','积分应用','极限理论','微分方程','线性代数','概率统计','矩阵运算','向量空间','数列收敛','级数求和'],
+    flash: ['洛必达法则','链式法则','隐函数求导','泰勒展开','牛顿莱布尼茨','分部积分','换元法','柯西准则','单调有界','夹逼定理','中值定理','罗尔定理','极值判定','拐点判据','渐近线'],
+    error: ['积分常量漏写','换元忘换限','求导漏项','极限方向错','极值充分条件混淆','连续性判断错','收敛半径算错','边界值遗漏'],
+  };
+  for (let i = 0; i < mocN; i++) nodes.push({ type: 'moc', label: labels.moc[i % labels.moc.length] });
+  for (let i = 0; i < flashN; i++) nodes.push({ type: 'flash', label: labels.flash[i % labels.flash.length] });
+  for (let i = 0; i < errN; i++) nodes.push({ type: 'error', label: labels.error[i % labels.error.length] });
+}
+
+// ===== Canvas 绘制工具 =====
+function drawScene(canvasId, layoutFn, edgeMode) {
+  const cv = document.getElementById(canvasId);
+  const ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height;
+  const cx = W / 2, cy = H / 2;
+  ctx.clearRect(0, 0, W, H);
+
+  // 虚拟根位置
+  const root = { x: cx, y: cy };
+  const hits = layoutFn(nodes, cx, cy);
+
+  // 画轨道参考圆（淡）
+  ctx.strokeStyle = '#ffffff0a';
+  ctx.lineWidth = 1;
+  const radii = [...new Set(hits.map(n => Math.round(Math.hypot(n.x - cx, n.y - cy))))];
+  radii.forEach(r => {
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+  });
+
+  // 画边
+  hits.forEach(n => {
+    ctx.beginPath();
+    ctx.moveTo(root.x, root.y);
+    ctx.lineTo(n.x, n.y);
+    if (edgeMode === 'hard') {
+      ctx.strokeStyle = HARD_COLOR;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([]);
+    } else {
+      ctx.strokeStyle = SOFT_COLOR + '88';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  });
+
+  // 画命中间的软连接（稀疏几条，模拟 aux 关联）
+  ctx.strokeStyle = SOFT_COLOR + '44';
+  ctx.lineWidth = 0.8;
+  ctx.setLineDash([3, 3]);
+  for (let i = 0; i < hits.length; i++) {
+    for (const j of [i + 3, i + 7]) {
+      if (j < hits.length) {
+        ctx.beginPath();
+        ctx.moveTo(hits[i].x, hits[i].y);
+        ctx.lineTo(hits[j].x, hits[j].y);
+        ctx.stroke();
+      }
+    }
+  }
+  ctx.setLineDash([]);
+
+  // 画命中节点
+  hits.forEach(n => {
+    const c = COLORS[n.type];
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, c.r, 0, Math.PI * 2);
+    ctx.fillStyle = c.fill;
+    ctx.fill();
+    ctx.strokeStyle = c.stroke;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // 标签（径向外推）
+    const ang = Math.atan2(n.y - cy, n.x - cx);
+    const lx = n.x + Math.cos(ang) * (c.r + 8);
+    const ly = n.y + Math.sin(ang) * (c.r + 8);
+    ctx.fillStyle = LABEL_COLOR;
+    ctx.font = '10px system-ui';
+    ctx.textAlign = Math.cos(ang) >= 0 ? 'left' : 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(n.label, lx, ly);
+  });
+
+  // 画虚拟根
+  ctx.beginPath();
+  ctx.arc(root.x, root.y, COLORS.root.r, 0, Math.PI * 2);
+  ctx.fillStyle = COLORS.root.fill;
+  ctx.fill();
+  ctx.strokeStyle = COLORS.root.stroke;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = '#1a1a2e';
+  ctx.font = 'bold 9px system-ui';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('查询', root.x, root.y);
+}
+
+// ===== 布局函数 =====
+// ① 现状：全 level=1，starRingSectorLayout 的等权结果 = 均匀单环
+function layoutCurrent(nodes, cx, cy) {
+  const baseR = 150;
+  const N = nodes.length;
+  if (N === 0) return [];
+  return nodes.map((n, i) => {
+    const a = -Math.PI / 2 + (i / N) * Math.PI * 2;
+    return { ...n, x: cx + Math.cos(a) * baseR, y: cy + Math.sin(a) * baseR };
+  });
+}
+
+// ② 纯 aux + 均匀单环（和①位置相同，但线全虚线）
+function layoutAuxUniform(nodes, cx, cy) {
+  return layoutCurrent(nodes, cx, cy);  // 位置算法一样，区别在 edgeMode
+}
+
+// ③ 纯 aux + 三轨道分层
+function layoutAuxOrbit(nodes, cx, cy) {
+  const baseR = 90, gap = 70;
+  const orbits = { moc: 0, flash: 1, error: 2 };
+  const byOrbit = {};
+  nodes.forEach(n => {
+    const o = orbits[n.type] ?? 0;
+    if (!byOrbit[o]) byOrbit[o] = [];
+    byOrbit[o].push(n);
+  });
+  const out = [];
+  Object.keys(byOrbit).forEach(o => {
+    const group = byOrbit[o];
+    const r = baseR + parseInt(o) * gap;
+    group.forEach((n, i) => {
+      const a = -Math.PI / 2 + (i / group.length) * Math.PI * 2;
+      out.push({ ...n, x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r });
+    });
+  });
+  return out;
+}
+
+// ===== 渲染 =====
+function renderAll() {
+  drawScene('cv1', layoutCurrent, 'hard');
+  drawScene('cv2', layoutAuxUniform, 'soft');
+  drawScene('cv3', layoutAuxOrbit, 'soft');
+}
+
+// ===== 交互 =====
+function readControls() {
+  return {
+    moc: parseInt(document.getElementById('mocN').value),
+    flash: parseInt(document.getElementById('flashN').value),
+    err: parseInt(document.getElementById('errN').value),
+  };
+}
+['mocN', 'flashN', 'errN'].forEach(id => {
+  document.getElementById(id).addEventListener('input', () => {
+    const v = readControls();
+    genNodes(v.moc, v.flash, v.err);
+    renderAll();
+  });
+});
+document.getElementById('redraw').addEventListener('click', renderAll);
+
+// 初始
+genNodes(5, 8, 4);
+renderAll();
+</script>
+
+</body>
+</html>

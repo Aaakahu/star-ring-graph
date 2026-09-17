@@ -10,6 +10,7 @@ export interface RingNode {
   children?: RingNode[];
   _filePath?: string;  // 对应的 md 文件路径（用于点击打开）
   _auxLinks?: string[]; // 辅助连线目标 basename 列表（mindtree[1..] 或 flash[1..]，不进树结构，只画装饰边）
+  _subtype?: string;   // Flash 卡片的 subtype: know_what / know_how / know_why
 }
 
 // 思维树前缀 → {depth, 父前缀}
@@ -168,6 +169,7 @@ async function buildSourceTree(app: App, src: SourceConfig): Promise<RingNode | 
       name: fm.title || f.basename,
       type: "flash",
       _filePath: f.path,
+      _subtype: fm.subtype,
       children: []
     };
 
@@ -199,9 +201,30 @@ async function buildSourceTree(app: App, src: SourceConfig): Promise<RingNode | 
   for (const f of errorFiles) {
     const content = await app.vault.read(f);
     const fm = parseFrontmatter(content);
-    // 挂载目标来自 frontmatter 的 flash 字段（文档 §5.3）
     const flashLinks: string[] = Array.isArray(fm.flash) ? fm.flash : [];
-    if (flashLinks.length === 0) continue; // 无匹配不挂载
+    // 无 flash 字段时，回退到 mindtree[0] → MOC 挂载（和 Flash 卡同逻辑）
+    // 这让只有 mindtree 的 error 卡也能进图谱，不再被 continue 丢弃
+    if (flashLinks.length === 0) {
+      const mindtree: string[] = Array.isArray(fm.mindtree) ? fm.mindtree : [];
+      if (mindtree.length === 0) continue; // 既无 flash 也无 mindtree → 不挂载
+
+      const errorNode: RingNode = {
+        name: fm.title || f.basename,
+        type: "error",
+        _filePath: f.path,
+        children: []
+      };
+      const primaryTarget = wikilinkToBasename(mindtree[0]);
+      const primaryMoc = mocByBasename.get(primaryTarget) || mocByBasename.get(primaryTarget.toLowerCase());
+      if (!primaryMoc) continue; // 目标 MOC 不存在，跳过
+
+      primaryMoc.children!.push(errorNode);
+      // mindtree[1..] → 辅连线到其他 MOC
+      if (mindtree.length > 1) {
+        errorNode._auxLinks = mindtree.slice(1).map(wikilinkToBasename);
+      }
+      continue;
+    }
 
     const errorNode: RingNode = {
       name: fm.title || f.basename,
@@ -221,7 +244,6 @@ async function buildSourceTree(app: App, src: SourceConfig): Promise<RingNode | 
     if (flashLinks.length > 1) {
       errorNode._auxLinks = flashLinks.slice(1).map(wikilinkToBasename);
     }
-    // 注意：Error.mindtree 字段不读、不画边（图谱不画 Error→MOC 参考边，方案 Y 共识）
   }
 
   return rootNode;
@@ -229,7 +251,12 @@ async function buildSourceTree(app: App, src: SourceConfig): Promise<RingNode | 
 
 // ============ 主入口：合并多源 ============
 export async function buildChapterTree(app: App, settings: any): Promise<RingNode> {
-  const sources: SourceConfig[] = settings.sources || [];
+  let sources: SourceConfig[] = settings.sources || [];
+  // 学科联动：activeSource 命中某数据源名时只显示该源（名字对不上则回退全部）
+  const active = settings.activeSource;
+  if (active && sources.some(s => s.name === active)) {
+    sources = sources.filter(s => s.name === active);
+  }
   if (sources.length === 0) {
     return { name: "空", type: "root", children: [] };
   }
@@ -260,11 +287,13 @@ export interface G6Node {
   labelCfg?: any;
   _filePath?: string;
   _originalType?: string;
+  _subtype?: string; // Flash 卡片的 subtype: know_what / know_how / know_why
   level?: number;
   chapterId?: string;
   x?: number;
   y?: number;
   collapsed?: boolean;
+  _isNav?: boolean; // 中间节点（有子节点的 moc）：归纳/枢纽，搜索时不进星云
 }
 
 export interface G6Edge {
@@ -316,10 +345,17 @@ export function convertToG6Data(rootNode: RingNode): G6Data {
       0: { fill: "#f0a94f", stroke: "#c4883f", shadowBlur: 12 },
       1: { fill: "#4f8ff7", stroke: "#3d7bd4", shadowBlur: 8 },
       2: { fill: "#4fd1c5", stroke: "#3db8ad", shadowBlur: 10 },
-      3: { fill: "#e06c75", stroke: "#c4555e", shadowBlur: 0 },  // flash：暗红
-      4: { fill: "#c678dd", stroke: "#a35bb8", shadowBlur: 0 },  // error：粉紫
+      3: { fill: "#c678dd", stroke: "#a35bb8", shadowBlur: 0 },  // flash：粉紫
+      4: { fill: "#e06c75", stroke: "#c4555e", shadowBlur: 0 },  // error：暗红
     };
-    const color = levelColorMap[level] || levelColorMap[2];
+    let color = levelColorMap[level] || levelColorMap[2];
+    // 中间节点（有子节点的 moc）：降级为浅灰半透明。它们是归纳/枢纽，不装载知识，
+    // 视觉上"退到背景"让叶子 moc（绿色，真知识）脱颖而出。
+    let navOpacity = 1;
+    if (level === 2 && node.children && node.children.some(c => /^moc/.test(c.type || ''))) {
+      color = { fill: "#8a8a8a", stroke: "#6a6a6a", shadowBlur: 0 };
+      navOpacity = 0.55;
+    }
 
     const levelConfig = [
       { size: 32, font: 13, opacity: 1 },
@@ -338,6 +374,7 @@ export function convertToG6Data(rootNode: RingNode): G6Data {
         lineWidth: level <= 1 ? 2 : 1,
         shadowColor: color.fill,
         shadowBlur: color.shadowBlur,
+        opacity: navOpacity,
       },
       labelCfg: {
         style: { fontSize: levelConfig.font, fill: "#d0d0d0", opacity: levelConfig.opacity },
@@ -345,8 +382,12 @@ export function convertToG6Data(rootNode: RingNode): G6Data {
       },
       _filePath: node._filePath,
       _originalType: node.type,
+      _subtype: node._subtype,
       level,
       chapterId: myChapter,
+      // _isNav 判定：有 MOC 结构子节点（type 以 moc 开头）才算导航。
+      // Flash/Error 挂载也会产生 children，但那是知识挂载不是树结构导航——不能据此判导航。
+      _isNav: level === 2 && !!(node.children && node.children.some(c => /^moc/.test(c.type || ''))),
     });
 
     if (parentId) {

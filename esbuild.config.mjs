@@ -15,6 +15,7 @@ esbuild.build({
   target: "es2020",
   platform: "node",
   external: ["obsidian", "electron"],
+  loader: { ".md": "text" },   // 内联 markdown 文本资源（如合并 prompt 前言）
   sourcemap: prod ? false : "inline",
   minify: prod,
   treeShaking: true,

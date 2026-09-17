@@ -5,17 +5,35 @@
       "mocFolder": "1_高等数学Moc",
       "flashFolder": "StudyGuide/Flash",
       "errorFolder": "StudyGuide/Errors"
+    },
+    {
+      "name": "信号与系统",
+      "mocFolder": "3_信号与系统Moc",
+      "flashFolder": "信号StudyGuide/Flash",
+      "errorFolder": "信号StudyGuide/Errors"
+    },
+    {
+      "name": "线性代数",
+      "mocFolder": "2_线性代数Moc",
+      "flashFolder": "线代StudyGuide/Flash",
+      "errorFolder": "线代StudyGuide/Errors"
     }
   ],
-  "layout": "sector",
+  "activeSource": "高数",
+  "layout": "fishbone",
   "detailZoom": 1.5,
-  "lightragUrl": "http://127.0.0.1:9620",
-  "llmProvider": "glm",
-  "llmApiKey": "3c19920de49e4128bd4bc1d74eb5ee03.NF2vjMOVXyO1BBoH",
-  "llmBaseUrl": "https://open.bigmodel.cn/api/paas/v4",
-  "llmModel": "GLM-4.5",
-  "embeddingApiKey": "",
-  "embeddingBaseUrl": "",
-  "embeddingModel": "embedding-3",
-  "lightragDir": "C:\\Users\\34547\\Desktop\\新版sg构建测试\\.obsidian\\plugins\\star-ring-graph\\lightrag"
+  "llmProfiles": [
+    {
+      "name": "DeepSeek",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "apiKey": "sk-17a63dfd893841e9bd6bdd5d19ca90cf",
+      "model": "deepseek-v4-flash",
+      "enabled": true
+    }
+  ],
+  "llmActive": 0,
+  "llmProvider": "deepseek",
+  "llmApiKey": "sk-17a63dfd893841e9bd6bdd5d19ca90cf",
+  "llmBaseUrl": "https://api.deepseek.com/v1",
+  "llmModel": "deepseek-v4-flash"
 }
