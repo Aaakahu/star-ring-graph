@@ -3,13 +3,16 @@
 import { ItemView, WorkspaceLeaf, MarkdownRenderer, Notice } from "obsidian";
 import type StarRingGraphPlugin from "./main";
 import G6 from '@antv/g6';
-import { buildChapterTree, convertToG6Data } from "./data";
+import { convertToG6Data } from "./data";
 import type { RingNode, G6Data } from "./data";
 // ponytail: 合并 prompt 前言（卡片属性规范/工作流/硬约束/取值表）放独立 md，
 // esbuild 以 text loader 内联成字符串，避免在 TS 里转义大量反引号。
 import mergePreamble from "./merge-preamble.md";
 
 export const STAR_RING_VIEW_TYPE = "star-ring-view";
+
+// 性能：诊断日志总开关。排查布局/渲染问题时临时改 true（会构造大对象数组，正式环境保持 false）。
+const SRG_DEBUG = false;
 
 // 真旭日图布局（移植自 Collapse Tree Konva 的 _layoutRadial + _positionRadial）。
 // 两趟递归：pass1 自底向上算角度权重（叶=0.5，folder=Σ子.sw+gap）；pass2 自顶向下按权重切分父扇区。
@@ -213,7 +216,7 @@ function drawCartesianAxes(graph: any, theme: Record<string, string>, bounds: Ca
   group.findAll((s: any) => s.get('name') === 'axis-group').forEach((g: any) => g.remove());
   const axisGroup = group.addGroup({ name: 'axis-group' });
   axisGroup.toBack();
-  console.log('[星环图谱][drawCartesianAxes] 开始画轴', { bounds: JSON.stringify(bounds), theme });
+  if (SRG_DEBUG) console.log('[星环图谱][drawCartesianAxes] 开始画轴', { bounds: JSON.stringify(bounds), theme });
 
   const CART = bounds;
   const axisColor = theme.axis || 'rgba(255,255,255,0.35)';
@@ -588,26 +591,29 @@ function resolveLabelOverlaps(nodes: any[], opts: { baseFs: number }) {
     node._labelCandidate = { ...resolved, fs };
   });
   // 诊断：标签避让统计 + 每个标签的框坐标/引线详情（供调参定位重叠源）
-  const _details = sorted.map(n => {
-    const c = n._labelCandidate;
-    if (!c || n.x === undefined) return null;
-    const lx = n.x + c.dx, ly = n.y + c.dy;
-    const w = estimateLabelWidth(n.label || '', c.fs);
-    const h = c.fs + 4;
-    const left = c.ax === 'center' ? lx - w/2 : (c.ax === 'right' ? lx - w : lx);
-    const top = c.ay === 'middle' ? ly - h/2 : (c.ay === 'bottom' ? ly - h : ly);
-    return {
-      label: (n.label || '').slice(0, 14),
-      节点坐标: `(${n.x|0},${n.y|0})`,
-      标签框: `左上(${left|0},${top|0}) 尺寸${w|0}x${h|0}`,
-      锚点: `${c.ax}/${c.ay}`,
-      引线: c.leader ? `→(${(n.x + c.leaderDx)|0},${(n.y + c.leaderDy)|0})` : '无',
-    };
-  }).filter(Boolean);
-  console.log(`[标签避让] 共 ${sorted.length} 个标签,引线 ${leaderCount} 条,残留重叠 ${collisionCount} 处`, _details);
+  // ponytail: 大对象数组构造在 SRG_DEBUG 关闭时整体跳过（每次扇区渲染都省一笔）
+  if (SRG_DEBUG) {
+    const _details = sorted.map(n => {
+      const c = n._labelCandidate;
+      if (!c || n.x === undefined) return null;
+      const lx = n.x + c.dx, ly = n.y + c.dy;
+      const w = estimateLabelWidth(n.label || '', c.fs);
+      const h = c.fs + 4;
+      const left = c.ax === 'center' ? lx - w/2 : (c.ax === 'right' ? lx - w : lx);
+      const top = c.ay === 'middle' ? ly - h/2 : (c.ay === 'bottom' ? ly - h : ly);
+      return {
+        label: (n.label || '').slice(0, 14),
+        节点坐标: `(${n.x|0},${n.y|0})`,
+        标签框: `左上(${left|0},${top|0}) 尺寸${w|0}x${h|0}`,
+        锚点: `${c.ax}/${c.ay}`,
+        引线: c.leader ? `→(${(n.x + c.leaderDx)|0},${(n.y + c.leaderDy)|0})` : '无',
+      };
+    }).filter(Boolean);
+    console.log(`[标签避让] 共 ${sorted.length} 个标签,引线 ${leaderCount} 条,残留重叠 ${collisionCount} 处`, _details);
+  }
 
   // 引线穿障诊断：每条引线检测是否穿过其他节点圆点 / 标签框 / 其他引线
-  if (leaderCount > 0) {
+  if (SRG_DEBUG && leaderCount > 0) {
     // 收集所有节点圆点（作为障碍）+ 标签框 + 引线段
     const _nodeCircles = sorted.map(n => ({ id: n.id, x: n.x || 0, y: n.y || 0, r: (n.size || 12) / 2 + 2, label: (n.label||'').slice(0,10) }));
     const _labelBoxes = sorted.map(n => {
@@ -676,10 +682,15 @@ function resolveLabelOverlaps(nodes: any[], opts: { baseFs: number }) {
 // 注册换行节点类型
 // theme:从 CSS 变量读出的主题色(draw 时 G6 canvas 不读 CSS,必须 JS 传值)。
 //   undefined 时用暗色兜底(防御)。
+// ponytail: 每次重建都重复注册同名节点类型——用「上次注册的 labelFill」去重，
+// 主题色真变了才重新注册（draw 闭包捕获 labelFill，不能无脑只注册一次）。
+let _registeredLabelFill: string | null = null;
 const registerWrappedLabelNode = (theme?: {
   labelFill: string;
 }) => {
   const labelFill = theme?.labelFill || '#e6edf3';
+  if (_registeredLabelFill === labelFill) return;
+  _registeredLabelFill = labelFill;
   G6.registerNode('wrapped-label-node', {
     draw(cfg: any, group: any) {
       const size = cfg.size || 12;
@@ -844,6 +855,11 @@ const setupNativeCanvasDrag = (
 ): (() => void) => {
   let origin: { x: number; y: number } | null = null;
   let altHeldAtDown = false;
+  // ponytail: 高回报率鼠标 mousemove 可达 125-1000Hz，远超帧率——位移累积到 rAF 合帧，
+  // 每帧至多一次 graph.translate（= 一次全画布重绘）
+  let rafPending = false;
+  let pendingDx = 0;
+  let pendingDy = 0;
 
   const isCanvasArea = (e: MouseEvent) => {
     const target = e.target as HTMLElement;
@@ -861,6 +877,12 @@ const setupNativeCanvasDrag = (
     if (!isCanvasArea(e)) return;
     const btn = e.button;
     const isCartesian = graph._currentLayout === 'cartesian';
+    if (btn === 2 || (btn === 0 && isCartesian && !nodeHitRef.value)) {
+      // 交互开始：取消镜头推拉动画、挂起 Minimap（重建画布期间由 renderGraph 重建这些引用）
+      (graph as any)._cancelViewportAnim?.();
+      (graph as any)._suspendMinimap?.();
+      (graph as any)._userMovedViewport = true;
+    }
     if (btn === 2) {
       e.preventDefault();
       origin = { x: e.clientX, y: e.clientY };
@@ -876,11 +898,18 @@ const setupNativeCanvasDrag = (
     const isLeft = e.buttons & 1;
     const isRight = e.buttons & 2;
     if (!isLeft && !isRight) { origin = null; return; }
-    const dx = e.clientX - origin.x;
-    const dy = e.clientY - origin.y;
-    if (dx === 0 && dy === 0) return;
+    pendingDx += e.clientX - origin.x;
+    pendingDy += e.clientY - origin.y;
     origin = { x: e.clientX, y: e.clientY };
-    graph.translate(dx, dy, false);
+    if (pendingDx === 0 && pendingDy === 0 || rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => {
+      rafPending = false;
+      if (!origin || (pendingDx === 0 && pendingDy === 0)) { pendingDx = 0; pendingDy = 0; return; }
+      graph.translate(pendingDx, pendingDy, false);
+      pendingDx = 0;
+      pendingDy = 0;
+    });
   };
 
   const onMouseUp = (e: MouseEvent) => {
@@ -925,6 +954,16 @@ export class StarRingView extends ItemView {
   // ===== LightRAG 查询浮层 =====
   private _queryOverlay: QueryOverlay | null = null;
   private _queryHighlightActive = false; // 查询高亮进行中时，抑制 hover 链路高亮
+  // ===== 交互性能：hover 状态 diff 缓存（autoPaint:false 下只对变化的 item 写状态，批量后一次 paint）=====
+  // key：节点 'n:'+id / 边 'e:'+下标 → 当前 hover 态；_hiddenLabels 记录 label 被隐藏的节点 key
+  private _hoverStates = new Map<string, 'active' | 'inactive'>();
+  private _hiddenLabels = new Set<string>();
+  // ===== 镜头推拉过渡动画（rAF 插值仿射矩阵）=====
+  private _vpAnimRaf: number | null = null;
+  // ===== 交互期挂起 Minimap（keyShape 模式每次视口变化全图缩画一遍，拖拽/缩放时成本翻倍）=====
+  private _minimapSuspendTimer: any = null;
+  // 字体等待只做一次（首个图谱渲染前），之后所有重建直接渲染
+  private static _fontWaitDone = false;
 
   constructor(leaf: WorkspaceLeaf, plugin: StarRingGraphPlugin) {
     super(leaf);
@@ -955,12 +994,17 @@ export class StarRingView extends ItemView {
     // 清状态时同步恢复所有 label 显示（hover 隐藏后松 Ctrl 必须把 label show 回来，否则文字永久消失）
     const clearHighlight = () => {
       if (!this.graph || this.graph.destroyed) return;
+      // 无 hover 状态时不清重绘（松 Ctrl 是高频动作，别白白整画布重绘）
+      const hadHover = this._hoverStates.size > 0 || this._hiddenLabels.size > 0;
+      this._hoverStates.clear();
+      this._hiddenLabels.clear();
       this.graph.getNodes().forEach((n: any) => {
         this.graph.clearItemStates(n, ['active', 'inactive']);
         const group = n.getContainer?.();
         if (group) group.findAll((s: any) => s.get('name') === 'node-label').forEach((lab: any) => lab.show());
       });
       this.graph.getEdges().forEach((e: any) => this.graph.clearItemStates(e, ['active', 'inactive']));
+      if (hadHover) this.paintNow();
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Control') this.ctrlHeld = true;
@@ -987,12 +1031,8 @@ export class StarRingView extends ItemView {
     };
 
     try {
-      // ponytail: 优先用插件级缓存（metadataCache.on('changed') 失效），首次后才秒开
-      let treeData = this.plugin._cachedTree;
-      if (!treeData) {
-        treeData = await buildChapterTree(this.app, this.plugin.settings);
-        this.plugin._cachedTree = treeData;
-      }
+      // ponytail: ensureTree 带并发去重——onload 预热与 onOpen 同时发起只构建一次
+      const treeData = await this.plugin.ensureTree();
       this.renderGraph(graphContainer, treeData);
     } catch (e) {
       container.empty();
@@ -1023,6 +1063,7 @@ export class StarRingView extends ItemView {
     opts?: { layoutOverride?: 'fishbone' | 'sector' | 'cartesian'; subtreeFocusId?: string; restoreMatrix?: number[]; prebuiltG6Data?: G6Data },
   ) {
     this._rendering = true; // 抑制 ResizeObserver 的 fitView，避免重建画布时覆盖已设的视角
+    this.cancelViewportAnim(); // 旧 graph 即将销毁，先停掉进行中的镜头推拉动画
     let cartBounds: CartesianBounds | undefined; // cartesian 布局算一次，drawCartesianAxes / clamp / resetViewport 复用
     // 读主题色(CSS 变量 → JS,G6 canvas 不读 CSS)
     const labelFill = readThemeVar(container, '--sr-label-fill', '#e6edf3');
@@ -1143,12 +1184,12 @@ export class StarRingView extends ItemView {
       };
       const counts = { moc: 0, flash: 0, error: 0 };
       g6Data.nodes.forEach(n => { counts[cartTypeOf(n)]++; });
-      console.log('[星环图谱][renderGraph] cartesian 分支', { layout, nodeCount: g6Data.nodes.length, counts });
+      if (SRG_DEBUG) console.log('[星环图谱][renderGraph] cartesian 分支', { layout, nodeCount: g6Data.nodes.length, counts });
       const cartBoundsLocal = computeCartesianBounds(g6Data.nodes, cartTypeOf);
       cartBounds = cartBoundsLocal;
-      console.log('[星环图谱][renderGraph] cartBounds', JSON.stringify(cartBoundsLocal));
+      if (SRG_DEBUG) console.log('[星环图谱][renderGraph] cartBounds', JSON.stringify(cartBoundsLocal));
       focusCartesianLayout(g6Data.nodes, g6Data.edges, cartBoundsLocal);
-      console.log('[星环图谱][renderGraph] 布局后首节点坐标', g6Data.nodes[0] ? { id: g6Data.nodes[0].id, x: g6Data.nodes[0].x, y: g6Data.nodes[0].y } : '无节点');
+      if (SRG_DEBUG) console.log('[星环图谱][renderGraph] 布局后首节点坐标', g6Data.nodes[0] ? { id: g6Data.nodes[0].id, x: g6Data.nodes[0].x, y: g6Data.nodes[0].y } : '无节点');
     } else {
       // 扇区布局 + 标签避让(新算法):
       //   1. 分流:level===1 且无子节点的"孤立文件"单独识别,从布局 edges 里临时摘掉
@@ -1200,17 +1241,23 @@ export class StarRingView extends ItemView {
     }
 
     // ponytail: 等一帧让容器完成布局再取尺寸——onOpen 时 getBoundingClientRect 常返回 0/偏小值，
-    // 导致 canvas 只渲染中间一小块、右侧大片空白
+    // 导致 canvas 只渲染中间一小块、右侧大片空白。单帧多数情况已够；rect 仍异常（<50px）再补一帧。
     await new Promise(r => requestAnimationFrame(() => r(null)));
-    await new Promise(r => requestAnimationFrame(() => r(null))); // 双 RAF 确保布局稳定
-    const rect = container.getBoundingClientRect();
+    let rect = container.getBoundingClientRect();
+    if (rect.width < 50) {
+      await new Promise(r => requestAnimationFrame(() => r(null)));
+      rect = container.getBoundingClientRect();
+    }
     const width = Math.max(400, rect.width);
     const height = Math.max(400, rect.height);
 
     // 销毁现有图谱实例（先移除旧 wheel / 画布拖拽监听，避免指向已销毁 canvas 的悬空引用）
     if (this._cleanupWheel) { this._cleanupWheel(); this._cleanupWheel = null; }
     if (this._cleanupCanvasDrag) { this._cleanupCanvasDrag(); this._cleanupCanvasDrag = null; }
+    // C1 镜头推拉：销毁前捕获旧镜头矩阵，新图渲染后从旧位置平滑推到新视角（聚焦/布局切换）
+    let prevMatrix: number[] | null = null;
     if (this.graph) {
+      prevMatrix = (this.graph.get('group').getMatrix() || []).slice();
       this.graph.destroy();
       this.graph = null;
     }
@@ -1219,6 +1266,11 @@ export class StarRingView extends ItemView {
     Array.from(container.querySelectorAll(':scope > canvas')).forEach(c => c.remove());
 
     // 初始化 G6 图谱
+    const minimapInstance = new G6.Minimap({
+      size: [150, 100],
+      className: 'star-ring-minimap',
+      type: 'keyShape',
+    });
     this.graph = new G6.Graph({
       container: container,
       width: width,
@@ -1227,7 +1279,12 @@ export class StarRingView extends ItemView {
       fitViewPadding: 40,
       minZoom: 0.02, // 允许 fitView 在旭日图全图时缩更小（原 0.1 导致大图 fitView 失败警告）
       maxZoom: 4, // 允许查询星云节点少时（如 3-4 张）放大填满，避免 ratio 3.x 截断警告
-      
+
+      // 性能关键：关闭每步自动重绘。G6 默认每次 setItemState/updateItem/translate 都整画布重绘，
+      // 一次 hover ~2(V+E) 次 = 几百次全量重绘。改为一批变更结束后手动 paintNow() 一次；
+      // viewportchange/node:drag/afterupdateitem 挂 rAF 合帧兜底（见下方 schedulePaint）。
+      autoPaint: false,
+
       // 交互模式
       modes: {
         default: [
@@ -1312,16 +1369,39 @@ export class StarRingView extends ItemView {
         },
       },
       
-      // 插件：小地图
+      // 插件：小地图（保存引用：交互期 removePlugin 挂起、停止后 addPlugin 恢复）
       plugins: [
-        new G6.Minimap({
-          size: [150, 100],
-          className: 'star-ring-minimap',
-          type: 'keyShape',
-        }),
+        minimapInstance,
       ],
     });
     (this.graph as any)._currentLayout = layout;
+    (this.graph as any)._minimap = minimapInstance;
+
+    // autoPaint:false 兜底：translate/zoom（内置 behavior 路径）和节点拖拽改完状态后不会自动重绘，
+    // 统一 rAF 合帧补一笔 paint——一帧至多一次，高频事件天然去重
+    {
+      let paintQueued = false;
+      const schedulePaint = () => {
+        if (paintQueued) return;
+        paintQueued = true;
+        requestAnimationFrame(() => {
+          paintQueued = false;
+          if (this.graph && !this.graph.destroyed) this.graph.paint();
+        });
+      };
+      this.graph.on('viewportchange', schedulePaint);
+      this.graph.on('node:drag', schedulePaint);
+      this.graph.on('node:dragmove', schedulePaint);
+      this.graph.on('afterupdateitem', schedulePaint);
+      // 供模块级拖拽处理器/Minimap 点击等无 this 上下文的路径调用
+      (this.graph as any)._schedulePaint = schedulePaint;
+      (this.graph as any)._cancelViewportAnim = () => this.cancelViewportAnim();
+      (this.graph as any)._suspendMinimap = () => this.suspendMinimap();
+      (this.graph as any)._userMovedViewport = false;
+      // 新图无任何 hover 状态，记账必须清零（旧图的 key 指向已销毁 item）
+      this._hoverStates.clear();
+      this._hiddenLabels.clear();
+    }
 
     // 辅连线样式覆盖：aux 边（Flash/Error 多挂载的辅助连线）用虚线，
     // 比父子结构边弱（细、淡）但仍可见，区别于主结构实线。位置由主挂决定，aux 不参与布局。
@@ -1334,27 +1414,35 @@ export class StarRingView extends ItemView {
       });
     }
 
+    // 字体就绪再首渲：省掉旧版「渲染后 fonts.load 回调里整图 render 第二遍」（render 会重置
+    // 矩阵 + 擦掉 axis-group，还得重画轴 + 复位视角）。首渲前最多等 250ms；只有超时后字体才
+    // 就绪的罕见情况（首启冷缓存），保留一次补渲 + 轴重画 + 视角复位兜底。
+    if (!StarRingView._fontWaitDone) {
+      StarRingView._fontWaitDone = true;
+      const fontsReady = document.fonts.load('13px "Sring UI Sans"', '样本AB12');
+      const timedOut = await Promise.race([
+        fontsReady.then(() => false),
+        new Promise<boolean>(r => setTimeout(() => r(true), 250)),
+      ]);
+      if (timedOut) {
+        fontsReady.then(() => {
+          if (!this.graph || this.graph.destroyed) return;
+          this.graph.render();
+          if (layout === 'cartesian' && cartBounds) {
+            const axisColor = readThemeVar(container, '--sr-axis', 'rgba(255,255,255,0.35)');
+            const gridColor = readThemeVar(container, '--sr-grid', 'rgba(255,255,255,0.08)');
+            const textColor = readThemeVar(container, '--sr-text-muted', 'rgba(255,255,255,0.5)');
+            drawCartesianAxes(this.graph, { axis: axisColor, grid: gridColor, text: textColor }, cartBounds);
+          }
+          this.resetViewport(container, false);
+          this.paintNow();
+        });
+      }
+    }
+
     // 加载数据并渲染
     this.graph.data(g6Data);
     this.graph.render();
-
-    // 字体加载后重绘：确保 canvas 标签用自定义字体渲染。
-    // ponytail: G6 的 render() 会重置 group 矩阵 + 擦掉手动加的 axis-group。
-    // render 后重新 fitView + 重画坐标轴，修复摄像机归位原点 + 坐标轴消失两个 bug。
-    // 不用 savedMatrix setMatrix——那会在字体加载延迟时覆盖用户已开始的拖动。
-    document.fonts.load('13px "Sring UI Sans"', '样本AB12').then(() => {
-      if (!this.graph || this.graph.destroyed) return;
-      this.graph.render();
-      // 重画坐标轴（修复坐标轴消失）——只在 cartesian 布局 + 有 bounds 时
-      if (layout === 'cartesian' && cartBounds) {
-        const axisColor = readThemeVar(container, '--sr-axis', 'rgba(255,255,255,0.35)');
-        const gridColor = readThemeVar(container, '--sr-grid', 'rgba(255,255,255,0.08)');
-        const textColor = readThemeVar(container, '--sr-text-muted', 'rgba(255,255,255,0.5)');
-        drawCartesianAxes(this.graph, { axis: axisColor, grid: gridColor, text: textColor }, cartBounds);
-      }
-      // 重新 fitView（修复摄像机归位原点）——render 重置矩阵后重新算
-      this.resetViewport(container, false);
-    });
 
     // 原生画布拖拽：绕过 G6 behavior，避免事件被吞
     const nodeHitRef = { value: false };
@@ -1367,7 +1455,7 @@ export class StarRingView extends ItemView {
       const axisColor = readThemeVar(container, '--sr-axis', 'rgba(255,255,255,0.35)');
       const gridColor = readThemeVar(container, '--sr-grid', 'rgba(255,255,255,0.08)');
       const textColor = readThemeVar(container, '--sr-text-muted', 'rgba(255,255,255,0.5)');
-      console.log('[星环图谱][renderGraph] 画坐标轴', { axisColor, gridColor, textColor });
+      if (SRG_DEBUG) console.log('[星环图谱][renderGraph] 画坐标轴', { axisColor, gridColor, textColor });
       drawCartesianAxes(this.graph, { axis: axisColor, grid: gridColor, text: textColor }, cartBounds);
       (this.graph as any)._cartesianBounds = cartBounds;
       // 最佳匹配节点加金色发光描边
@@ -1378,58 +1466,87 @@ export class StarRingView extends ItemView {
       }
     }
 
-    // 初始视角：退出聚焦时恢复进入前保存的视图矩阵；否则按布局设默认视角
+    // 初始视角：退出聚焦时恢复进入前保存的视图矩阵；否则按布局设默认视角。
+    // 有旧镜头矩阵（聚焦/布局切换重建）时走镜头推拉过渡；首次打开直接就位。
     if (opts?.restoreMatrix && Array.isArray(opts.restoreMatrix) && opts.restoreMatrix.length >= 6) {
-      this.graph.get('group').setMatrix(opts.restoreMatrix.slice());
+      if (prevMatrix && prevMatrix.length >= 9) {
+        this.graph.get('group').setMatrix(prevMatrix.slice());
+        this.animateViewport(opts.restoreMatrix.slice());
+      } else {
+        this.graph.get('group').setMatrix(opts.restoreMatrix.slice());
+        this.paintNow();
+      }
       this.graph.get('group').set('lazyCheckSize', false);
     } else {
-      this.resetViewport(container, true);
+      this.resetViewport(container, true, prevMatrix);
     }
-    // 诊断：渲染收尾时检查 graph 状态 + 视口矩阵
-    const _endMatrix = this.graph.get('group').getMatrix();
-    const _nodeCount = this.graph.getNodes().length;
-    console.log('[星环图谱][renderGraph] 渲染收尾', {
-      layout, nodeCount: _nodeCount,
-      graphDestroyed: this.graph.destroyed,
-      matrix: _endMatrix ? _endMatrix.slice(0, 6) : null,
-      containerSize: container.getBoundingClientRect(),
-    });
+    if (SRG_DEBUG) {
+      // 诊断：渲染收尾时检查 graph 状态 + 视口矩阵
+      const _endMatrix = this.graph.get('group').getMatrix();
+      const _nodeCount = this.graph.getNodes().length;
+      console.log('[星环图谱][renderGraph] 渲染收尾', {
+        layout, nodeCount: _nodeCount,
+        graphDestroyed: this.graph.destroyed,
+        matrix: _endMatrix ? _endMatrix.slice(0, 6) : null,
+        containerSize: container.getBoundingClientRect(),
+      });
+    }
     // 延迟解除渲染抑制：必须晚于 ResizeObserver 的 200ms 防抖窗口，
     // 让重建画布触发的尺寸变化 fitView 被吞掉，不覆盖刚设好的视角
     setTimeout(() => { this._rendering = false; }, 400);
 
-    // 扇区布局：600ms 后再断言一次视角。fonts 回调里的 render() 会重置画布矩阵、
-    // resize 防抖也可能晚到；手动矩阵重设是幂等操作，重跑无副作用（聚焦态除外）。
+    // 扇区布局：600ms 后再断言一次视角。手动矩阵重设幂等、重跑无副作用（聚焦态除外）；
+    // 但用户若已开始拖拽/缩放，断言会把视角snap回去——加 _userMovedViewport 守卫跳过。
     if (layout === 'sector' && !opts?.subtreeFocusId) {
       setTimeout(() => {
-        if (this.graph && !this.graph.destroyed && !this.focusMode) this.resetViewport(container, false);
+        if (this.graph && !this.graph.destroyed && !this.focusMode
+          && !(this.graph as any)._userMovedViewport) this.resetViewport(container, false);
       }, 600);
     }
 
     // 鱼骨/直角坐标系布局专属滚轮行为：无 Alt 时上下平移（保持当前缩放比例）；Alt 时手动缩放。
     // 统一在 DOM 层处理，不依赖 G6 zoom-canvas 与本监听器的触发顺序（两者都注册在 canvas 上，顺序不可靠）。
     // 旭日图布局滚轮即缩放（由 zoom-canvas 处理），这里直接 return。
+    // ponytail: 滚轮逐事件 translate/zoomTo = 逐事件全画布重绘（触控板惯性尤其夸张）。
+    // rAF 合帧：每帧只应用最后一个滚轮事件。sector 布局的 wheel 也从这里过
+    //（借道挂起 Minimap + 取消镜头动画 + 标记用户已交互），缩放本身仍交给 zoom-canvas。
+    let wheelRaf = 0;
+    let pendingWheel: WheelEvent | null = null;
     const wheelHandler = (e: WheelEvent) => {
-      if (this._currentLayout !== 'fishbone' && this._currentLayout !== 'cartesian') return; // 旭日图交给 zoom-canvas
       if (!this.graph || this.graph.destroyed) return;
+      this.suspendMinimap();
+      this.cancelViewportAnim();
+      (this.graph as any)._userMovedViewport = true;
+      if (this._currentLayout !== 'fishbone' && this._currentLayout !== 'cartesian') return; // 旭日图交给 zoom-canvas
       e.preventDefault();
-      if (e.altKey) {
-        // Alt+滚轮：以鼠标位置为中心缩放。G6 zoomTo 的 ratio 是绝对值，需算出目标 zoom。
-        const curZoom = this.graph.getZoom ? this.graph.getZoom() : 1;
-        const ratio = e.deltaY < 0 ? 1.1 : 1 / 1.1; // 向上滚放大，向下滚缩小
-        const [minZoom, maxZoom] = this._currentLayout === 'cartesian' ? [0.2, 3] : [0.1, 3];
-        const newZoom = Math.max(minZoom, Math.min(maxZoom, curZoom * ratio));
-        this.graph.zoomTo(newZoom, { x: e.offsetX, y: e.offsetY });
-      } else {
-        // 普通滚轮：上下平移，保持当前缩放比例
-        const dy = e.deltaY > 0 ? 60 : -60;
-        const zoom = this.graph.getZoom ? this.graph.getZoom() : 1;
-        this.graph.translate(0, -dy / zoom); // 除以 zoom 让平移量与缩放比例解耦
-      }
+      pendingWheel = e;
+      if (wheelRaf) return;
+      wheelRaf = requestAnimationFrame(() => {
+        wheelRaf = 0;
+        const ev = pendingWheel;
+        pendingWheel = null;
+        if (!ev || !this.graph || this.graph.destroyed) return;
+        if (ev.altKey) {
+          // Alt+滚轮：以鼠标位置为中心缩放。G6 zoomTo 的 ratio 是绝对值，需算出目标 zoom。
+          const curZoom = this.graph.getZoom ? this.graph.getZoom() : 1;
+          const ratio = ev.deltaY < 0 ? 1.1 : 1 / 1.1; // 向上滚放大，向下滚缩小
+          const [minZoom, maxZoom] = this._currentLayout === 'cartesian' ? [0.2, 3] : [0.1, 3];
+          const newZoom = Math.max(minZoom, Math.min(maxZoom, curZoom * ratio));
+          this.graph.zoomTo(newZoom, { x: ev.offsetX, y: ev.offsetY });
+        } else {
+          // 普通滚轮：上下平移，保持当前缩放比例
+          const dy = ev.deltaY > 0 ? 60 : -60;
+          const zoom = this.graph.getZoom ? this.graph.getZoom() : 1;
+          this.graph.translate(0, -dy / zoom); // 除以 zoom 让平移量与缩放比例解耦
+        }
+      });
     };
     const canvasEl = this.graph.get('canvas').get('el') as HTMLElement;
     canvasEl.addEventListener('wheel', wheelHandler, { passive: false });
-    this._cleanupWheel = () => canvasEl.removeEventListener('wheel', wheelHandler);
+    this._cleanupWheel = () => {
+      canvasEl.removeEventListener('wheel', wheelHandler);
+      if (wheelRaf) { cancelAnimationFrame(wheelRaf); wheelRaf = 0; }
+    };
 
     // 监听容器尺寸变化：面板被拖宽/窗口缩放时同步画布尺寸，避免画布卡在初始尺寸留黑边
     // ponytail: ResizeObserver 比 window.resize 更准——Obsidian 拖动左右分隔条不触发 window resize
@@ -1496,6 +1613,27 @@ export class StarRingView extends ItemView {
       labels.forEach((lab: any) => { visible ? lab.show() : lab.hide(); });
     };
 
+    // hover 状态 diff 写入：G6 v4 每次 setItemState 末尾都调 autoPaint()（关掉前 = 整画布重绘）。
+    // 旧实现对全部 V+E 各写 2 次 → 一次 hover 几百次全量重绘。现在：
+    //   1. 只对 hover 态真正变化的 item 调 setItemState（_hoverStates 记账）
+    //   2. label 显隐也只对变化的节点操作 shape（_hiddenLabels 记账）
+    //   3. 批量结束后 paintNow() 一次 → 一次 hover = 1 次全量重绘
+    const setHoverState = (item: any, key: string, next: 'active' | 'inactive' | null) => {
+      const cur = this._hoverStates.get(key) ?? null;
+      if (cur === next) return;
+      if (cur) this.graph.setItemState(item, cur, false);
+      if (next) this.graph.setItemState(item, next, true);
+      if (next) this._hoverStates.set(key, next);
+      else this._hoverStates.delete(key);
+    };
+    const setLabelVisibleDiff = (nodeItem: any, key: string, visible: boolean) => {
+      const hidden = this._hiddenLabels.has(key);
+      if (visible === !hidden) return; // 显隐状态没变，不碰 shape
+      setLabelVisible(nodeItem, visible);
+      if (visible) this._hiddenLabels.delete(key);
+      else this._hiddenLabels.add(key);
+    };
+
     this.graph.on('node:mouseenter', (evt: any) => {
       if (this.ctrlHeld) return; // Ctrl 锁定：不切换高亮
       if (!this.graph || this.graph.destroyed) return;
@@ -1507,48 +1645,49 @@ export class StarRingView extends ItemView {
 
       // 收集 active 链上的边（两端都在 activeIds 内）
       const activeEdges = new Set<string>();
-      this.g6Data.edges.forEach((e: any, idx: number) => {
+      (this.g6Data.edges as any[]).forEach((e: any, idx: number) => {
         if (activeIds.has(e.source) && activeIds.has(e.target)) activeEdges.add(String(idx));
       });
 
       this.graph.getNodes().forEach((n: any) => {
         const m = n.getModel();
         if (!m) return;
-        if (activeIds.has(m.id)) {
-          this.graph.setItemState(n, 'active', true);
-          this.graph.setItemState(n, 'inactive', false);
-          setLabelVisible(n, true); // active 链路文字保持显示
-        } else {
-          this.graph.setItemState(n, 'active', false);
-          this.graph.setItemState(n, 'inactive', true);
-          setLabelVisible(n, false); // 非链路文字直接隐藏
-        }
+        const key = 'n:' + m.id;
+        const isActive = activeIds.has(m.id);
+        setHoverState(n, key, isActive ? 'active' : 'inactive');
+        setLabelVisibleDiff(n, key, isActive); // active 链路文字保持显示，其余隐藏
       });
       this.graph.getEdges().forEach((ed: any, idx: number) => {
-        if (activeEdges.has(String(idx))) {
-          this.graph.setItemState(ed, 'active', true);
-          this.graph.setItemState(ed, 'inactive', false);
-        } else {
-          this.graph.setItemState(ed, 'active', false);
-          this.graph.setItemState(ed, 'inactive', true);
-        }
+        setHoverState(ed, 'e:' + idx, activeEdges.has(String(idx)) ? 'active' : 'inactive');
       });
+      this.paintNow(); // 批量提交：整批状态变化只重绘一次
     });
 
     this.graph.on('node:mouseleave', (evt: any) => {
       if (this.ctrlHeld) return; // Ctrl 锁定：移出不清
       if (!this.graph || this.graph.destroyed) return;
+      // 只清真正带 hover 态的 item + 恢复被隐藏的 label（无状态时不重绘）
+      let dirty = false;
       this.graph.getNodes().forEach((n: any) => {
-        this.graph.clearItemStates(n, ['active', 'inactive']);
-        setLabelVisible(n, true); // 恢复所有文字标签显示
+        const m = n.getModel();
+        if (!m) return;
+        const key = 'n:' + m.id;
+        if (this._hoverStates.has(key)) { this.graph.clearItemStates(n, ['active', 'inactive']); this._hoverStates.delete(key); dirty = true; }
+        if (this._hiddenLabels.has(key)) { setLabelVisible(n, true); this._hiddenLabels.delete(key); dirty = true; }
       });
-      this.graph.getEdges().forEach((e: any) => this.graph.clearItemStates(e, ['active', 'inactive']));
+      this.graph.getEdges().forEach((ed: any, idx: number) => {
+        const key = 'e:' + idx;
+        if (this._hoverStates.has(key)) { this.graph.clearItemStates(ed, ['active', 'inactive']); this._hoverStates.delete(key); dirty = true; }
+      });
+      if (dirty) this.paintNow();
     });
 
     // 节点交互：单击 = 折叠/展开子树；双击 = 打开对应笔记；右键 = 打开对应笔记
     // ponytail: G6 click 总在 dblclick 前触发，用 220ms 延迟区分 —— 单击延迟执行折叠，
     //           双击在延迟期内触发则取消折叠 timer、改执行打开笔记
     let clickTimer: any = null;
+    // 本轮重建内被折叠隐藏的边 id（updateItem 是重量操作且触发重绘，只对真正变化的边调用）
+    const hiddenEdgeIds = new Set<string>();
     const toggleCollapse = (model: any) => {
       const collapsed = !model.collapsed;
       model.collapsed = collapsed;
@@ -1567,15 +1706,19 @@ export class StarRingView extends ItemView {
         const item = this.graph!.findById(id);
         if (item) this.graph!.updateItem(item, { visible: !collapsed });
       });
-      // 边同步：任一端点不可见则隐藏
+      // 边同步：任一端点不可见则隐藏（diff：只 updateItem 可见性真正变化的边）
       this.graph!.getEdges().forEach(edge => {
         const sModel = edge.getSource()?.getModel();
         const tModel = edge.getTarget()?.getModel();
         if (!sModel || !tModel) return;
-        const sVisible = sModel.visible !== false;
-        const tVisible = tModel.visible !== false;
-        this.graph!.updateItem(edge, { visible: sVisible && tVisible });
+        const nextVisible = sModel.visible !== false && tModel.visible !== false;
+        const id = edge.getId();
+        if (nextVisible === !hiddenEdgeIds.has(id)) return; // 可见性没变
+        this.graph!.updateItem(edge, { visible: nextVisible });
+        if (nextVisible) hiddenEdgeIds.delete(id);
+        else hiddenEdgeIds.add(id);
       });
+      this.paintNow(); // autoPaint:false：折叠批量结束后一次性重绘
     };
 
     this.graph.on('node:click', (evt) => {
@@ -1689,28 +1832,85 @@ export class StarRingView extends ItemView {
       const dx = -dCx * mainPerPixel;
       const dy = -dCy * mainPerPixelY;
 
+      this.cancelViewportAnim();
+      this.suspendMinimap();
+      (this.graph as any)._userMovedViewport = true;
       this.graph.translate(dx, dy, false);
     });
   }
 
-  // 重置视角：鱼骨布局 → 聚焦根节点 + 固定可读缩放（1.0），根节点停在左上 padding 处；
-  // 旭日图布局 → fitView 全图。animate=true 用于初始渲染（有过渡），false 用于点击重置（即时）。
-  private resetViewport(container: HTMLElement, animate: boolean) {
+  // autoPaint:false 后的统一手动重绘。G6 每次整画布重绘不便宜，调用方必须在一批
+  // setItemState/updateItem/矩阵变更结束后只调一次（交互批量提交的最后一笔）。
+  private paintNow() {
+    if (this.graph && !this.graph.destroyed && typeof this.graph.paint === 'function') this.graph.paint();
+  }
+
+  // 取消进行中的镜头推拉动画（用户滚轮/拖拽/新动画开始时调用）
+  cancelViewportAnim() {
+    if (this._vpAnimRaf !== null) { cancelAnimationFrame(this._vpAnimRaf); this._vpAnimRaf = null; }
+  }
+
+  // 镜头推拉过渡：rAF 逐帧插值 9 元素仿射矩阵（线性插值保持仿射性），easeOutCubic。
+  // 从当前矩阵出发滑向 target；用户交互（滚轮/拖拽）立即取消。
+  private animateViewport(target: number[], duration = 350) {
     if (!this.graph || this.graph.destroyed) return;
+    const group = this.graph.get('group');
+    const from = (group.getMatrix() || [1, 0, 0, 0, 1, 0, 0, 0, 1]).slice();
+    while (from.length < 9) from.push(0);
+    const t = target.slice();
+    while (t.length < 9) t.push(0);
+    this.cancelViewportAnim();
+    const start = performance.now();
+    const step = () => {
+      if (!this.graph || this.graph.destroyed) { this._vpAnimRaf = null; return; }
+      const p = Math.min(1, (performance.now() - start) / duration);
+      const k = 1 - Math.pow(1 - p, 3); // easeOutCubic
+      const m = from.map((v, i) => v + (t[i] - v) * k);
+      group.setMatrix(m);
+      this.paintNow();
+      if (p < 1) { this._vpAnimRaf = requestAnimationFrame(step); }
+      else { this._vpAnimRaf = null; }
+    };
+    this._vpAnimRaf = requestAnimationFrame(step);
+  }
+
+  // 交互期挂起 Minimap：keyShape 模式每次视口变化都把全图缩画一遍，拖拽/缩放高频事件下
+  // 主画布成本近似翻倍。交互开始 removePlugin，停止 150ms 后 addPlugin 恢复（会立即重画一次）。
+  suspendMinimap() {
+    const g = this.graph as any;
+    if (!g || g.destroyed) return;
+    const mm = g._minimap;
+    if (!mm) return;
+    const plugins = g.get('plugins') || [];
+    if (plugins.includes(mm)) g.removePlugin(mm);
+    if (this._minimapSuspendTimer) clearTimeout(this._minimapSuspendTimer);
+    this._minimapSuspendTimer = setTimeout(() => {
+      this._minimapSuspendTimer = null;
+      if (!this.graph || this.graph.destroyed) return;
+      if (!(this.graph.get('plugins') || []).includes(mm)) {
+        this.graph.addPlugin(mm);
+        this.attachMinimapClick(); // removePlugin 会销毁 minimap DOM，恢复后重新绑定点击跳转
+      }
+    }, 150);
+  }
+
+  // 重置视角：鱼骨布局 → 聚焦根节点 + 固定可读缩放（1.0），根节点停在左上 padding 处；
+  // 旭日图布局 → fitView 全图。animate=true 且传入 animateFrom 时从旧镜头推拉过渡到新视角
+  // （聚焦进入/退出/布局切换），否则即时就位。
+  private resetViewport(container: HTMLElement, animate: boolean, animateFrom?: number[] | null) {
+    if (!this.graph || this.graph.destroyed) return;
+    const group = this.graph.get('group');
+    // 各布局统一算目标矩阵 [s,0,0,0,s,0,e,f,1]，最后按需即时就位或镜头推拉过渡。
+    // （旧版鱼骨分支用 zoomTo+translate 两段式，数学等价于 e=60-root.x / f=60-root.y 的直接矩阵）
+    let target: number[] | null = null;
+
     if (this._currentLayout === 'fishbone' && this.g6Data) {
       const rootModel = this.g6Data.nodes.find(n => (n.level ?? 0) === 0);
-      const targetZoom = 1.0;
-      if (rootModel && typeof rootModel.x === 'number') {
-        // 先以根节点为中心缩放，再平移把根节点挪到视口左上 padding 处
-        this.graph.zoomTo(targetZoom, { x: rootModel.x, y: rootModel.y });
-        const r = container.getBoundingClientRect();
-        const matrix = this.graph.get('group').getMatrix() || [1,0,0,0,1,0,0,0,1];
-        const zoom = matrix[0];
-        const dx = (rootModel.x * zoom) - 60;  // 根节点投影到视口左边 60px
-        const dy = (rootModel.y * zoom) - 60;  // 根节点投影到视口顶部 60px
-        this.graph.translate(dx, dy);
+      if (rootModel && typeof rootModel.x === 'number' && typeof rootModel.y === 'number') {
+        // zoom 1.0，根节点投影到视口左上 (60,60)
+        target = [1, 0, 0, 0, 1, 0, 60 - rootModel.x, 60 - rootModel.y, 1];
       } else {
-        this.graph.zoomTo(targetZoom, { x: (container.getBoundingClientRect().width) / 2, y: 0 });
+        target = [1, 0, 0, 0, 1, 0, 0, 0, 1]; // 兜底：居中原点（原 zoomTo(1) 在 zoom 已为 1 时的等价矩阵）
       }
     } else if (this._currentLayout === 'cartesian') {
       // 聚焦视角：缩放 + 平移让整个坐标系 bounds 刚好落入视口（体现远近大小）。
@@ -1732,8 +1932,7 @@ export class StarRingView extends ItemView {
       const mtxE = vpCx - worldCx * scale;
       const mtxF = vpCy - worldCy * scale;
       // ponytail: G6 v4/gl-matrix 用 9 元素列优先矩阵 [a,b,0, c,d,0, e,f,1]，不能写 6 元素，否则 translate() 读到 undefined 算出 NaN 冻结画布
-      this.graph.get('group').setMatrix([scale, 0, 0, 0, scale, 0, mtxE, mtxF, 1]);
-      this.graph.get('group').set('lazyCheckSize', false);
+      target = [scale, 0, 0, 0, scale, 0, mtxE, mtxF, 1];
     } else {
       // 旭日图（扇区）：不走 G6 fitView。它的实现是 translate+zoom 两段式加补间动画，
       // 在大树上有多个静默失效点（bbox 无效/NaN 直接 return、zoom 超范围被拒、
@@ -1748,7 +1947,8 @@ export class StarRingView extends ItemView {
         if (n.y < minY) minY = n.y; if (n.y > maxY) maxY = n.y;
       });
       if (minX === Infinity) {
-        this.graph.fitView(40, undefined, true, animate ? { easing: 'easeCubic', duration: 300 } : undefined);
+        this.graph.fitView(40, undefined, true);
+        this.paintNow();
         return;
       }
       const r = container.getBoundingClientRect();
@@ -1763,15 +1963,19 @@ export class StarRingView extends ItemView {
       const mtxE = vpW / 2 - worldCx * scale;
       const mtxF = vpH / 2 - worldCy * scale;
       // ponytail: G6 v4 用 9 元素列优先矩阵，6 元素会让 translate 读到 undefined 算出 NaN 冻结画布
-      this.graph.get('group').setMatrix([scale, 0, 0, 0, scale, 0, mtxE, mtxF, 1]);
-      this.graph.get('group').set('lazyCheckSize', false);
-      // setMatrix 不一定触发重绘（取决于 autoPaint 时机），显式 paint 保证矩阵立即生效
-      if (typeof this.graph.paint === 'function') this.graph.paint();
-      console.log('[星环图谱][resetViewport] 扇区手动矩阵', {
-        scale: +scale.toFixed(3),
-        bbox: `${Math.round(minX)},${Math.round(minY)} ~ ${Math.round(maxX)},${Math.round(maxY)}`,
-        vp: `${Math.round(vpW)}x${Math.round(vpH)}`,
-      });
+      target = [scale, 0, 0, 0, scale, 0, mtxE, mtxF, 1];
+    }
+
+    if (!target) return;
+    group.set('lazyCheckSize', false);
+    if (animate && animateFrom && animateFrom.length >= 9) {
+      // 镜头推拉：先摆到旧镜头位置，再滑向新目标（聚焦进入/退出/布局切换的连续过渡）
+      group.setMatrix(animateFrom.slice());
+      this.animateViewport(target);
+    } else {
+      group.setMatrix(target);
+      // setMatrix 不触发 viewportchange/autoPaint，显式 paint 保证矩阵立即生效
+      this.paintNow();
     }
   }
 
@@ -1835,7 +2039,7 @@ export class StarRingView extends ItemView {
    * ESC 唯一退出（exitFocus），Alt+左键被 isQuery 守卫拦截。
    */
   private async focusOnQueryHits(finalMap: Map<string, number>, skipFade = false) {
-    console.log('[星环图谱][focusOnQueryHits] 进入', { finalMapSize: finalMap.size, hasGraph: !!this.graph, skipFade });
+    if (SRG_DEBUG) console.log('[星环图谱][focusOnQueryHits] 进入', { finalMapSize: finalMap.size, hasGraph: !!this.graph, skipFade });
     if (!this.graph || finalMap.size === 0) {
       console.warn('[星环图谱][focusOnQueryHits] 早退', { noGraph: !this.graph, emptyMap: finalMap.size === 0 });
       return;
@@ -1850,7 +2054,7 @@ export class StarRingView extends ItemView {
     // skipFade: 种子→picks 切换时跳过淡出淡入（已在星云态，直接重建避免闪烁）
     if (!skipFade) await this.fadeCanvas(false);
     const subG6Data = this.cropG6DataByQueryHits(finalMap);
-    console.log('[星环图谱][focusOnQueryHits] 裁剪后', { nodes: subG6Data.nodes.length, edges: subG6Data.edges.length });
+    if (SRG_DEBUG) console.log('[星环图谱][focusOnQueryHits] 裁剪后', { nodes: subG6Data.nodes.length, edges: subG6Data.edges.length });
     await this.renderGraph(gc, this._currentTree!, {
       layoutOverride: 'cartesian',
       prebuiltG6Data: subG6Data,
@@ -1903,9 +2107,8 @@ export class StarRingView extends ItemView {
     if (!gc) return;
     try {
       // ponytail: rerenderGraph 由设置/主题变更触发，强制清缓存重读（设置可能改了源文件夹）
-      this.plugin._cachedTree = null;
-      const treeData = await buildChapterTree(this.app, this.plugin.settings);
-      this.plugin._cachedTree = treeData;
+      this.plugin.invalidateTree();
+      const treeData = await this.plugin.ensureTree();
       this.renderGraph(gc, treeData);
     } catch (e) {
       console.error("[星环图谱] 重建失败", e);
@@ -1917,9 +2120,9 @@ export class StarRingView extends ItemView {
     if (!this.container) return;
     // 查询星云视图期间跳过（changeData 会把星云子图替换成全量数据）
     if (this.focusMode?.isQuery) return;
-    
+
     try {
-      const treeData = await buildChapterTree(this.app, this.plugin.settings);
+      const treeData = await this.plugin.ensureTree();
       const g6Data: G6Data = convertToG6Data(treeData);
       
       if (this.graph) {
@@ -3048,23 +3251,25 @@ ${sections}`;
     // Pass 2: 类型过滤——GLM picks 已经过语境精筛，跳过模式类型过滤
     const finalMap = skipTypeFilter ? hitMap : this.expandByStructure(g6Data, hitMap, mode).finalMap;
     this._lastFinalMap = finalMap;
-    // 诊断：hitMap 里 moc 节点的匹配情况（排查 moc 被过滤问题）
-    const _hitMocs = [...hitMap.entries()].map(([id, rank]) => {
-      const n = g6Data.nodes.find(x => x.id === id);
-      return n && (n.level ?? 0) === 2 ? { rank, label: n.label, level: n.level, isNav: n._isNav, inFinal: finalMap.has(id) } : null;
-    }).filter(Boolean);
-    console.log('[星环图谱] applyHighlight 诊断:', {
-      source: sourceLabel,
-      mode,
-      entityNames,
-      hitIdsSize: hitMap.size,
-      finalIdsSize: finalMap.size,
-      hitMap里的moc: _hitMocs,
-      finalNodes: [...finalMap.entries()].sort((a,b) => a[1] - b[1]).map(([id, rank]) => {
+    if (SRG_DEBUG) {
+      // 诊断：hitMap 里 moc 节点的匹配情况（排查 moc 被过滤问题）
+      const _hitMocs = [...hitMap.entries()].map(([id, rank]) => {
         const n = g6Data.nodes.find(x => x.id === id);
-        return n ? { rank, label: n.label, level: n.level, path: n._filePath || '' } : id;
-      }),
-    });
+        return n && (n.level ?? 0) === 2 ? { rank, label: n.label, level: n.level, isNav: n._isNav, inFinal: finalMap.has(id) } : null;
+      }).filter(Boolean);
+      console.log('[星环图谱] applyHighlight 诊断:', {
+        source: sourceLabel,
+        mode,
+        entityNames,
+        hitIdsSize: hitMap.size,
+        finalIdsSize: finalMap.size,
+        hitMap里的moc: _hitMocs,
+        finalNodes: [...finalMap.entries()].sort((a,b) => a[1] - b[1]).map(([id, rank]) => {
+          const n = g6Data.nodes.find(x => x.id === id);
+          return n ? { rank, label: n.label, level: n.level, path: n._filePath || '' } : id;
+        }),
+      });
+    }
 
     // 用命中节点集合重建独立星云视图（替代旧的"主图谱叠高亮状态"）
     this.view._queryHighlightActive = true;

@@ -57,6 +57,20 @@ function parseFrontmatter(content: string): Record<string, any> {
   return fm;
 }
 
+// frontmatter 字符串列表规范化：metadataCache 的 YAML 解析可能给出嵌套数组（如未加引号的
+// [[wikilink]] 被解析成 flow sequence），统一拍平成字符串，语义与旧手写解析器一致。
+const asStringList = (v: any): string[] =>
+  Array.isArray(v) ? v.map(x => (Array.isArray(x) ? x.map(String).join("|") : String(x))) : [];
+
+// 读单个文件的 frontmatter：优先 metadataCache（解析结果常驻内存，零 IO——打开图谱
+// 不再逐文件 await vault.read 读全文，几百张卡的首开从秒级降到毫秒级）。
+// 缓存缺失（无 YAML 头/启动竞态）才回退全文读取，行为与旧版一致。
+async function readFrontmatter(app: App, f: TFile): Promise<Record<string, any>> {
+  const fm = app.metadataCache.getFileCache(f)?.frontmatter;
+  if (fm) return fm;
+  return parseFrontmatter(await app.vault.read(f));
+}
+
 // depth → type 映射
 function depthToType(depth: number): string {
   if (depth === 0) return "root";
@@ -159,10 +173,9 @@ async function buildSourceTree(app: App, src: SourceConfig): Promise<RingNode | 
   const flashByBasename = new Map<string, RingNode>();
 
   for (const f of flashFiles) {
-    const content = await app.vault.read(f);
-    const fm = parseFrontmatter(content);
+    const fm = await readFrontmatter(app, f);
     // 挂载目标来自 frontmatter 的 mindtree 字段（文档 §5.2）
-    const mindtree: string[] = Array.isArray(fm.mindtree) ? fm.mindtree : [];
+    const mindtree: string[] = asStringList(fm.mindtree);
     if (mindtree.length === 0) continue; // 文档 §4.3：无匹配不挂载
 
     const flashNode: RingNode = {
@@ -199,13 +212,12 @@ async function buildSourceTree(app: App, src: SourceConfig): Promise<RingNode | 
   }
 
   for (const f of errorFiles) {
-    const content = await app.vault.read(f);
-    const fm = parseFrontmatter(content);
-    const flashLinks: string[] = Array.isArray(fm.flash) ? fm.flash : [];
+    const fm = await readFrontmatter(app, f);
+    const flashLinks: string[] = asStringList(fm.flash);
     // 无 flash 字段时，回退到 mindtree[0] → MOC 挂载（和 Flash 卡同逻辑）
     // 这让只有 mindtree 的 error 卡也能进图谱，不再被 continue 丢弃
     if (flashLinks.length === 0) {
-      const mindtree: string[] = Array.isArray(fm.mindtree) ? fm.mindtree : [];
+      const mindtree: string[] = asStringList(fm.mindtree);
       if (mindtree.length === 0) continue; // 既无 flash 也无 mindtree → 不挂载
 
       const errorNode: RingNode = {
@@ -420,6 +432,7 @@ export function convertToG6Data(rootNode: RingNode): G6Data {
     if (!childrenOf.has(e.source)) childrenOf.set(e.source, []);
     childrenOf.get(e.source)!.push(e.target);
   });
+  const nodeById = new Map<string, G6Node>(nodes.map(n => [n.id, n]));
   const hasCloudDescendant = (startId: string): boolean => {
     const queue: string[] = [startId];
     const seen = new Set<string>();
@@ -427,7 +440,7 @@ export function convertToG6Data(rootNode: RingNode): G6Data {
       const cur = queue.shift()!;
       if (seen.has(cur)) continue;
       seen.add(cur);
-      const n = nodes.find(x => x.id === cur);
+      const n = nodeById.get(cur);
       if (n && cur !== startId && (n.level ?? 0) >= 3) return true;
       (childrenOf.get(cur) || []).forEach(c => queue.push(c));
     }

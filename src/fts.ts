@@ -14,8 +14,17 @@ import * as path from "path";
 
 // ponytail: 直接 require 纯 JS 实现，避免 esbuild 处理 .wasm 资产。
 // sql-asm.js 比 sql-wasm.js 大但零外部依赖，Electron 沙箱里最稳。
-// @ts-ignore - sql.js 自带类型走 sql-wasm.js，但我们用 sql-asm.js，类型靠手动声明
-const initSqlJs = require("sql.js/dist/sql-asm.js");
+// 性能：收进懒加载函数——顶层 require 会在插件加载（含 Obsidian 每次启动）时执行整个
+// sql-asm 引擎初始化（1.3MB 纯 JS）。esbuild 把 CJS 模块包成懒初始化闭包，首次建/查索引才执行。
+// @ts-ignore - sql.js 自带类型走 sql-wasm.js，我们用 sql-asm.js，类型靠手动声明
+let _initSqlJs: any = null;
+function getSqlJs(): any {
+  if (!_initSqlJs) {
+    // @ts-ignore - 见上
+    _initSqlJs = require("sql.js/dist/sql-asm.js");
+  }
+  return _initSqlJs;
+}
 
 // ============ 类型 ============
 export type CardKind = "moc" | "flash" | "error";
@@ -219,7 +228,7 @@ export class IndexBuilder {
     count: number;
     byKind: Record<string, number>;
   }> {
-    const SQL = await initSqlJs();
+    const SQL = await getSqlJs();
     const cards = this.collectCards(folders);
 
     const byKind: Record<string, number> = {};
@@ -375,7 +384,7 @@ export class FtsIndex {
     if (!fs.existsSync(this.dbPath)) {
       throw new Error(`索引不存在：${this.dbPath}，请先在设置面板点「重建索引」`);
     }
-    const SQL = await initSqlJs();
+    const SQL = await getSqlJs();
     const buf = fs.readFileSync(this.dbPath);
     this.db = new SQL.Database(new Uint8Array(buf));
     this.mtime = fs.statSync(this.dbPath).mtimeMs;

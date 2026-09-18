@@ -21,18 +21,15 @@ export async function loadPluginFonts(plugin: any): Promise<void> {
       try {
         const path = fontDir + '/fonts/' + file;
         const data = await adapter.readBinary(path);
-        // ArrayBuffer → base64
-        const bytes = new Uint8Array(data);
-        let binary = '';
-        for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-        const base64 = btoa(binary);
-        const dataUrl = `data:font/woff2;base64,${base64}`;
+        // ponytail: Blob URL 直接引用 ArrayBuffer（零拷贝零转码），替代旧版逐字节 base64 拼接
+        //（1.4MB 字体 ≈ 上百万次字符串连接，全在主线程）。不 revoke：@font-face 引用期间必须有效。
+        const url = URL.createObjectURL(new Blob([data], { type: 'font/woff2' }));
 
         // 提取 weight（每个文件对应一个 weight）
         const w = file.match(/(\d+)\.woff2/)?.[1] || '400';
 
         const style = document.createElement('style');
-        style.textContent = `@font-face { font-family: "${family}"; src: url("${dataUrl}"); font-weight: ${w}; font-display: swap; }`;
+        style.textContent = `@font-face { font-family: "${family}"; src: url("${url}"); font-weight: ${w}; font-display: swap; }`;
         document.head.appendChild(style);
       } catch (e) {
         // 静默失败，回退系统字体

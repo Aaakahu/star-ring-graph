@@ -9,11 +9,9 @@
   },
   "dependencies": {
     "@antv/g6": "^4.8.24",
-    "d3": "^7.9.0",
     "sql.js": "^1.14.1"
   },
   "devDependencies": {
-    "@types/d3": "^7.4.3",
     "@types/node": "^20.11.0",
     "@types/sql.js": "^1.4.11",
     "esbuild": "^0.21.5",

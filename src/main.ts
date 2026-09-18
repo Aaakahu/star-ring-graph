@@ -1,6 +1,7 @@
 // 星环图谱插件入口
 import { Plugin, PluginSettingTab, Setting, Notice, debounce, requestUrl } from "obsidian";
 import { StarRingView, STAR_RING_VIEW_TYPE } from "./view";
+import { buildChapterTree } from "./data";
 import { FtsIndex, IndexBuilder } from "./fts";
 import { loadPluginFonts } from "./font-loader";
 import * as fs from "fs";
@@ -91,6 +92,25 @@ export default class StarRingGraphPlugin extends Plugin {
   fts: FtsIndex | null = null;
   // ponytail: buildChapterTree 缓存——首次 onOpen 后，重开/刷新走缓存（只读 frontmatter，metadataCache 变更时失效）
   _cachedTree: any = null;
+  // 进行中的树构建 promise（onload 预热与视图 onOpen 并发发起时共享同一次构建）
+  private _treeBuildPromise: Promise<any> | null = null;
+
+  /** 取树数据：有缓存直接用；没有就构建（并发调用共享同一 promise，只构建一次）。 */
+  async ensureTree(): Promise<any> {
+    if (this._cachedTree) return this._cachedTree;
+    if (!this._treeBuildPromise) {
+      this._treeBuildPromise = buildChapterTree(this.app, this.settings)
+        .then(t => { this._cachedTree = t; this._treeBuildPromise = null; return t; })
+        .catch(e => { this._treeBuildPromise = null; throw e; });
+    }
+    return this._treeBuildPromise;
+  }
+
+  /** 缓存失效（文件变更/设置变更）。所有原来直接置 `_cachedTree = null` 的地方统一走这里。 */
+  invalidateTree() {
+    this._cachedTree = null;
+    this._treeBuildPromise = null;
+  }
   // 数据源文件变更后的实时重建：批量导入/重命名会对每个文件触发一次事件，防抖 1.5s 合并成一次
   private scheduleLiveRebuild = debounce(() => this.refreshView(), 1500, true);
 
@@ -131,7 +151,7 @@ export default class StarRingGraphPlugin extends Plugin {
       if (!this._cachedTree) return;
       const folders = this.settings.sources.flatMap(s => [s.mocFolder, s.flashFolder, s.errorFolder]);
       if (folders.some(f => file.path.startsWith(f + '/') || file.path.startsWith(f + '\\'))) {
-        this._cachedTree = null;
+        this.invalidateTree();
         this.scheduleLiveRebuild();
       }
     }));
@@ -143,7 +163,7 @@ export default class StarRingGraphPlugin extends Plugin {
       const folders = this.settings.sources.flatMap(s => [s.mocFolder, s.flashFolder, s.errorFolder]);
       const touches = (p: string) => folders.some(f => p.startsWith(f + '/') || p.startsWith(f + '\\'));
       if (touches(file.path) || touches(oldPath)) {
-        this._cachedTree = null;
+        this.invalidateTree();
         this.scheduleLiveRebuild();
       }
     }));
@@ -151,7 +171,7 @@ export default class StarRingGraphPlugin extends Plugin {
       if (!this._cachedTree) return;
       const folders = this.settings.sources.flatMap(s => [s.mocFolder, s.flashFolder, s.errorFolder]);
       if (folders.some(f => file.path.startsWith(f + '/') || file.path.startsWith(f + '\\'))) {
-        this._cachedTree = null;
+        this.invalidateTree();
         this.scheduleLiveRebuild();
       }
     }));
@@ -161,6 +181,15 @@ export default class StarRingGraphPlugin extends Plugin {
     // 加载失败不致命（用户可能在首次使用前还没建索引），只是查询时报错。
     this.loadFtsIndex().catch((e) => {
       console.warn("[星环图谱] FTS 索引加载失败（查询时会再尝试）：", e?.message || e);
+    });
+
+    // 后台预热树缓存：布局就绪 + metadataCache 解析完成后构建一次。
+    // 否则上次关闭时图谱 leaf 开着 → workspace 恢复在启动窗口内冷构建树，拖慢启动体感；
+    // 预热后首次打开图谱直接命中缓存（ensureTree 并发去重，与 onOpen 撞车也只构建一次）。
+    this.app.workspace.onLayoutReady(() => {
+      const preheat = () => this.ensureTree().catch(() => { /* 预热失败静默，打开时再试 */ });
+      if ((this.app.metadataCache as any).resolved) preheat();
+      else this.registerEvent(this.app.metadataCache.on('resolved', () => preheat()));
     });
 
     console.log("[星环图谱] 插件已加载");
@@ -391,7 +420,7 @@ export default class StarRingGraphPlugin extends Plugin {
   refreshView() {
     // 学科/数据源切换可能改了 activeSource 过滤条件：先清插件级缓存，
     // 否则图谱关闭状态下切换，下次打开会吃旧缓存（视图首渲染只读 _cachedTree）
-    this._cachedTree = null;
+    this.invalidateTree();
     this.app.workspace.getLeavesOfType(STAR_RING_VIEW_TYPE)
       .forEach(leaf => (leaf.view as any).rerenderGraph?.());
   }
